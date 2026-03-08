@@ -40,3 +40,4 @@ jobs:
           # 변경사항이 있을 때만 커밋
           git diff --cached --quiet || git commit -m "📊 paper live update $(date -u +'%Y-%m-%d %H:%M UTC')"
           git push
+
