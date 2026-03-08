@@ -1,0 +1,2 @@
+run_time,live_start,latest_bar,total_return,final_equity,max_drawdown,sharpe,num_live_trades,new_trades,trend_pos_BTC,trend_pos_ETH,sleeve_pos_BTC,sleeve_pos_ETH,market_regime
+2026-03-08 17:34 UTC,2026-03-08 16:00:00+00:00,2026-03-08 16:00:00+00:00,0.0,10000.0,0.0,0.0,0,0,FLAT,FLAT,SHORT,SHORT,STRONG_TREND_BEAR

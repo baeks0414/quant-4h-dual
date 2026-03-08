@@ -1,0 +1,15 @@
+{
+  "final_equity": 10000.0,
+  "last_bar_time": "2026-03-08 16:00:00+00:00",
+  "live_start": "2026-03-08 16:00:00+00:00",
+  "market_regime": "STRONG_TREND_BEAR",
+  "sleeve_positions": {
+    "BTCUSDT": "SHORT",
+    "ETHUSDT": "SHORT"
+  },
+  "total_return": 0.0,
+  "trend_positions": {
+    "BTCUSDT": "FLAT",
+    "ETHUSDT": "FLAT"
+  }
+}
