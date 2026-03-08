@@ -2,10 +2,10 @@
 """
 실시간 스테이트풀 페이퍼 트레이딩 - GitHub Actions 원샷 버전
 
-paper_live_run.py 와의 차이:
-- 바이낸스에서 최근 WARMUP_BARS봉을 실시간 fetch (과거 2025-04-12부터 전체 재계산 X)
-- state.json 으로 포지션/마지막 봉 시간을 유지 → 실행 간 연속성
-- 새 봉에서 발생한 거래만 incremental하게 기록
+동작 방식:
+- 바이낸스에서 최근 WARMUP_BARS봉을 live fetch → 지표(EMA/ATR/ADX) 웜업용
+- 수익/거래 추적은 첫 실행 시점(live_start)부터만 집계
+- state.json에 live_start, last_bar_time, 포지션 등을 저장 → 실행 간 연속성
 
 실행:
     python scripts/paper_live_stateful.py
@@ -21,10 +21,10 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
 # GitHub Actions 환경: 캐시 완전 비활성화 → 항상 Binance 실시간 데이터
-os.environ["QUANT_MEM_CACHE"]           = "0"
-os.environ["QUANT_BT_USE_MEM_CACHE"]   = "0"
-os.environ["QUANT_BT_PROGRESS_EVERY"]  = "0"
-os.environ["QUANT_BT_SAVE_ARTIFACTS"]  = "0"
+os.environ["QUANT_MEM_CACHE"]          = "0"
+os.environ["QUANT_BT_USE_MEM_CACHE"]  = "0"
+os.environ["QUANT_BT_PROGRESS_EVERY"] = "0"
+os.environ["QUANT_BT_SAVE_ARTIFACTS"] = "0"
 
 import pandas as pd
 
@@ -110,12 +110,6 @@ def main() -> None:
     now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     OUTDIR.mkdir(parents=True, exist_ok=True)
 
-    print("=" * 65)
-    print(f"  [PAPER RT] {now_utc}")
-    print(f"  Trend({TREND_WEIGHT:.0%}) + Sleeve({SLEEVE_WEIGHT:.0%})")
-    print(f"  최근 {WARMUP_BARS}봉 바이낸스 실시간 fetch")
-    print("=" * 65)
-
     # ── 설정 ──────────────────────────────────────────────────────────
     trend_cfg  = preset_dynamic_bear_state_trend()
     sleeve_cfg = preset_balanced_alpha_sleeve_aggressive()
@@ -126,30 +120,42 @@ def main() -> None:
     interval = trend_cfg.interval
 
     # ── 이전 상태 로드 ────────────────────────────────────────────────
-    state          = load_state(str(STATE_PATH))
+    state         = load_state(str(STATE_PATH))
     last_bar_time: pd.Timestamp | None = None
+    live_start:    pd.Timestamp | None = None   # 페이퍼 트레이딩 시작 시점 (첫 실행에 설정)
+    is_first_run  = "live_start" not in state
+
     if state.get("last_bar_time"):
         try:
             last_bar_time = pd.Timestamp(state["last_bar_time"]).tz_convert("UTC")
         except Exception:
             pass
+    if state.get("live_start"):
+        try:
+            live_start = pd.Timestamp(state["live_start"]).tz_convert("UTC")
+        except Exception:
+            pass
 
     # ── 바이낸스 실시간 데이터 fetch ──────────────────────────────────
+    print("=" * 65)
+    print(f"  [PAPER RT] {now_utc}{'  [첫 실행 - 시작점 설정]' if is_first_run else ''}")
+    print(f"  Trend({TREND_WEIGHT:.0%}) + Sleeve({SLEEVE_WEIGHT:.0%})")
+    if live_start:
+        print(f"  live_start : {live_start}")
+    print("=" * 65)
     print("\n[FETCH] 바이낸스에서 실시간 데이터 로딩 중...")
+
     price: dict[str, pd.DataFrame] = {}
     feat_t: dict[str, pd.DataFrame] = {}
     feat_s: dict[str, pd.DataFrame] = {}
     for sym in symbols:
-        price[sym] = fetch_live_bars(sym, interval, WARMUP_BARS)
+        price[sym]  = fetch_live_bars(sym, interval, WARMUP_BARS)
         feat_t[sym] = add_features(price[sym], trend_cfg)
         feat_s[sym] = add_features(price[sym], sleeve_cfg)
         print(f"  {sym}: {len(price[sym])}봉  ({price[sym].index[0]} ~ {price[sym].index[-1]})")
 
     funding: dict[str, pd.DataFrame] = {s: fetch_live_funding(s) for s in symbols}
 
-    # 마지막 봉 (아직 확정 안 된 현재 봉은 제외)
-    # 가장 최근 완성 봉 = index[-2] (현재 진행중인 봉 = index[-1])
-    # 단, 실행 직후라서 최신 봉이 방금 닫혔을 수도 있음 → index[-1] 사용
     latest_bar = feat_t[symbols[0]].index[-1]
     print(f"\n[BAR] 최신 확정 봉: {latest_bar}")
 
@@ -167,42 +173,38 @@ def main() -> None:
     t_engine = Engine(trend_cfg,  t_strat, PaperBroker(trend_cfg),  t_risk, t_port)
     s_engine = Engine(sleeve_cfg, s_strat, PaperBroker(sleeve_cfg), s_risk, s_port)
 
-    # ── 전체 봉 replay (웜업 + 라이브) ───────────────────────────────
-    print(f"\n[REPLAY] {WARMUP_BARS}봉 replay 중 (웜업 포함)...")
-    mkt = trend_cfg.market_symbol
+    # ── 전체 봉 replay (웜업 포함) ────────────────────────────────────
+    print(f"\n[REPLAY] {WARMUP_BARS}봉 replay 중 (지표 웜업)...")
+    mkt       = trend_cfg.market_symbol
     all_times = feat_t[symbols[0]].index
 
-    for t_idx, bar_t in enumerate(all_times):
+    for bar_t in all_times:
         t_py = bar_t.to_pydatetime()
 
-        # 마켓 레짐 업데이트
         if trend_cfg.enable_regime_gate:
             update_market_regime_gate(t_strat, mkt, feat_t[mkt], bar_t, equity=t_port.equity)
         if sleeve_cfg.enable_regime_gate:
             update_market_regime_gate(s_strat, mkt, feat_s[mkt], bar_t, equity=s_port.equity)
 
-        # 펀딩 적용
         for sym in symbols:
             fdf = funding[sym]
             if fdf is not None and not fdf.empty:
                 fdf_sub = fdf.loc[:bar_t]
                 if not fdf_sub.empty:
-                    rate = float(fdf_sub["fundingRate"].iloc[-1])
+                    rate     = float(fdf_sub["fundingRate"].iloc[-1])
                     close_px = float(feat_t[sym].loc[bar_t, "close"])
                     t_port.update_close(sym, close_px)
                     t_port.apply_funding(t_py, sym, rate)
                     s_port.update_close(sym, close_px)
                     s_port.apply_funding(t_py, sym, rate)
 
-        # on_bar
         for sym in symbols:
             fdf = funding[sym]
-            fr = None
+            fr  = None
             if fdf is not None and not fdf.empty:
                 fdf_sub = fdf.loc[:bar_t]
                 if not fdf_sub.empty:
                     fr = float(fdf_sub["fundingRate"].iloc[-1])
-
             t_row = to_feature_rows(sym, feat_t[sym].loc[[bar_t]])[0]
             s_row = to_feature_rows(sym, feat_s[sym].loc[[bar_t]])[0]
             t_engine.on_bar(t_row, funding_rate=fr)
@@ -213,29 +215,71 @@ def main() -> None:
 
     print("  replay 완료.")
 
-    # ── 결과 추출 ─────────────────────────────────────────────────────
+    # ── live_start 설정 (첫 실행이면 지금 봉으로 고정) ───────────────
+    if is_first_run:
+        live_start = latest_bar
+        state["live_start"] = str(live_start)
+        print(f"\n[INIT] 페이퍼 트레이딩 시작점 설정: {live_start}")
+
+    # ── 결과 추출 (live_start 이후만) ────────────────────────────────
     t_res = t_engine.result()
     s_res = s_engine.result()
 
     all_trades = pd.concat([t_res.trades, s_res.trades], ignore_index=True)
     if not all_trades.empty and "time" in all_trades.columns:
+        all_trades["time"] = pd.to_datetime(all_trades["time"], utc=True)
         all_trades = all_trades.sort_values("time").reset_index(drop=True)
 
-    # 이번 실행에서 새로 발생한 거래만 필터
-    if last_bar_time is not None and not all_trades.empty and "time" in all_trades.columns:
-        new_trades = all_trades[pd.to_datetime(all_trades["time"], utc=True) > last_bar_time]
+    # live_start 이후 거래만
+    if live_start is not None and not all_trades.empty and "time" in all_trades.columns:
+        live_trades = all_trades[all_trades["time"] > live_start].copy()
     else:
-        new_trades = all_trades
+        live_trades = pd.DataFrame()
 
-    # ── equity curve 합산 ─────────────────────────────────────────────
+    # 이번 실행에서 새로 발생한 거래
+    if last_bar_time is not None and not live_trades.empty:
+        new_trades = live_trades[live_trades["time"] > last_bar_time]
+    else:
+        new_trades = live_trades
+
+    # ── equity curve: live_start 기준으로 정규화 ──────────────────────
     t_ec = t_res.equity_curve[["equity"]].copy()
     s_ec = s_res.equity_curve[["equity"]].copy()
     t_ec.index = pd.to_datetime(t_ec.index, utc=True)
     s_ec.index = pd.to_datetime(s_ec.index, utc=True)
-    idx = t_ec.index.intersection(s_ec.index)
+    idx      = t_ec.index.intersection(s_ec.index)
     combined = pd.DataFrame(index=idx)
     combined["equity"] = t_ec.loc[idx, "equity"] + s_ec.loc[idx, "equity"]
-    combined["drawdown"] = combined["equity"] / combined["equity"].cummax() - 1.0
+
+    # live_start 이후만 잘라서 $10,000으로 정규화
+    if live_start is not None:
+        live_ec = combined[combined.index >= live_start].copy()
+        if not live_ec.empty:
+            eq_at_start  = live_ec["equity"].iloc[0]
+            scale        = INITIAL_EQUITY / eq_at_start
+            live_ec["equity"] = live_ec["equity"] * scale
+        else:
+            live_ec = combined.copy()
+            live_ec["equity"] = INITIAL_EQUITY
+    else:
+        live_ec      = combined.copy()
+        eq_at_start  = live_ec["equity"].iloc[0]
+        live_ec["equity"] = live_ec["equity"] / eq_at_start * INITIAL_EQUITY
+
+    live_ec["drawdown"] = live_ec["equity"] / live_ec["equity"].cummax() - 1.0
+
+    # ── 지표 계산 ─────────────────────────────────────────────────────
+    if not live_trades.empty:
+        metrics   = compute_metrics(live_ec, live_trades, INITIAL_EQUITY, interval)
+        total_ret = metrics.get("total_return", 0.0)
+        mdd       = metrics.get("max_drawdown", 0.0)
+        sharpe    = metrics.get("sharpe", 0.0)
+    else:
+        total_ret = float(live_ec["equity"].iloc[-1]) / INITIAL_EQUITY - 1.0
+        mdd       = float(live_ec["drawdown"].min())
+        sharpe    = 0.0
+
+    final_eq = float(live_ec["equity"].iloc[-1])
 
     # ── 현재 포지션 ───────────────────────────────────────────────────
     def side_str(side: int) -> str:
@@ -243,38 +287,26 @@ def main() -> None:
 
     t_positions = {sym: side_str(t_port.positions[sym].side) for sym in symbols}
     s_positions = {sym: side_str(s_port.positions[sym].side) for sym in symbols}
-    t_regime = getattr(t_strat, "last_market_regime", None)
-
-    # ── 지표 계산 ─────────────────────────────────────────────────────
-    metrics = compute_metrics(combined, all_trades, INITIAL_EQUITY, interval)
-    final_eq  = metrics.get("final_equity", combined["equity"].iloc[-1])
-    total_ret = metrics.get("total_return", 0.0)
-    mdd       = metrics.get("max_drawdown", 0.0)
-    sharpe    = metrics.get("sharpe", 0.0)
+    t_regime    = getattr(t_strat, "last_market_regime", None)
 
     # ── CSV 저장 (누적) ───────────────────────────────────────────────
-    # trades: 이전 기록 + 신규 거래 누적
-    if TRADES_PATH.exists() and not new_trades.empty:
-        old_trades = pd.read_csv(TRADES_PATH)
-        combined_trades = pd.concat([old_trades, new_trades], ignore_index=True)
-        combined_trades.to_csv(TRADES_PATH, index=False)
-    elif not new_trades.empty:
-        new_trades.to_csv(TRADES_PATH, index=False)
-    elif not TRADES_PATH.exists() and not all_trades.empty:
-        all_trades.to_csv(TRADES_PATH, index=False)
+    # trades: live_start 이후 거래 누적 (중복 방지: time+symbol 기준)
+    if not live_trades.empty:
+        live_trades.to_csv(TRADES_PATH, index=False)
 
-    # equity curve: 최신 전체 저장
-    combined.to_csv(EQUITY_PATH)
+    # equity curve: live 구간만 저장
+    live_ec.to_csv(EQUITY_PATH)
 
     # run_log: 매 실행마다 한 줄 추가
     log_row = {
         "run_time":        now_utc,
+        "live_start":      str(live_start),
         "latest_bar":      str(latest_bar),
         "total_return":    round(total_ret, 6),
         "final_equity":    round(final_eq, 2),
         "max_drawdown":    round(mdd, 6),
         "sharpe":          round(sharpe, 6),
-        "num_trades":      len(all_trades),
+        "num_live_trades": len(live_trades),
         "new_trades":      len(new_trades),
         "trend_pos_BTC":   t_positions.get("BTCUSDT", "FLAT"),
         "trend_pos_ETH":   t_positions.get("ETHUSDT", "FLAT"),
@@ -298,17 +330,20 @@ def main() -> None:
 
     # ── 출력 ─────────────────────────────────────────────────────────
     print("\n" + "=" * 65)
-    print("  [결과]")
+    print(f"  [결과]  {'첫 실행 - 앞으로 이 시점부터 추적' if is_first_run else ''}")
+    print(f"  페이퍼 시작 : {live_start}")
     print(f"  최신 봉     : {latest_bar}")
     print(f"  BTC 레짐    : {t_regime}")
     print(f"  Trend 포지션: {t_positions}")
     print(f"  Sleeve 포지션: {s_positions}")
     print(f"  ─────────────────────────────────────────────────────")
-    print(f"  총수익률    : {total_ret*100:+.2f}%")
-    print(f"  최종자산    : ${final_eq:>10,.2f}")
-    print(f"  MDD         : {mdd*100:.2f}%")
-    print(f"  Sharpe      : {sharpe:.4f}")
-    print(f"  전체 거래수 : {len(all_trades)}건  (이번 실행 신규: {len(new_trades)}건)")
+    if is_first_run:
+        print(f"  수익률/MDD  : (다음 봉부터 집계 시작)")
+    else:
+        print(f"  총수익률    : {total_ret*100:+.2f}%  (시작: $10,000 → ${final_eq:,.2f})")
+        print(f"  MDD         : {mdd*100:.2f}%")
+        print(f"  Sharpe      : {sharpe:.4f}")
+    print(f"  live 거래수 : {len(live_trades)}건  (이번 실행 신규: {len(new_trades)}건)")
     print(f"\n  저장: {OUTDIR}/")
 
 
