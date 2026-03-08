@@ -1,0 +1,42 @@
+name: Paper Trading (4H)
+
+on:
+  schedule:
+    # 4H 봉 마감 5분 후 실행 (UTC 기준)
+    # Binance 4H 봉: 00:00, 04:00, 08:00, 12:00, 16:00, 20:00 마감
+    - cron: "5 0,4,8,12,16,20 * * *"
+
+  # 수동 실행도 가능
+  workflow_dispatch:
+
+jobs:
+  paper-trade:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    permissions:
+      contents: write   # 결과 CSV를 레포에 커밋하기 위해 필요
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -e . --quiet
+
+      - name: Run paper trading
+        run: python scripts/paper_live_run.py
+
+      - name: Commit results
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add results/paper_live/
+          # 변경사항이 있을 때만 커밋
+          git diff --cached --quiet || git commit -m "📊 paper live update $(date -u +'%Y-%m-%d %H:%M UTC')"
+          git push

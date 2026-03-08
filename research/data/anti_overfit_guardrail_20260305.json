@@ -1,0 +1,189 @@
+{
+  "summary": {
+    "metrics": {
+      "cell_positive_ratio": 0.8333333333333334,
+      "worst_cell_return": -0.1997086860697086,
+      "worst_cell_mdd": -0.467573019598556,
+      "median_cell_sharpe": 0.8352093442003679,
+      "perturb_pass_ratio": 1.0,
+      "perturb_worst_drop": 0.46542142616050164
+    },
+    "thresholds": {
+      "MIN_POSITIVE_CELL_RATIO": 0.67,
+      "MIN_WORST_CELL_RETURN": -0.35,
+      "MIN_WORST_CELL_MDD": -0.6,
+      "MIN_MEDIAN_CELL_SHARPE": 0.3,
+      "MIN_PERTURB_PASS_RATIO": 0.7,
+      "MAX_PERTURB_RETURN_DROP": 0.55
+    },
+    "checks": {
+      "cell_positive_ratio": true,
+      "worst_cell_return": true,
+      "worst_cell_mdd": true,
+      "median_cell_sharpe": true,
+      "perturb_pass_ratio": true,
+      "perturb_worst_drop": true
+    },
+    "pass_all": true
+  },
+  "cell_rows": [
+    {
+      "basket": "BTCUSDT_ETHUSDT",
+      "slice": "slice_2022H1_2023H1",
+      "start": "2022-01-01",
+      "end": "2023-06-30",
+      "total_return": 0.8375649825847911,
+      "max_drawdown": -0.467573019598556,
+      "sharpe": 0.961495741398673,
+      "winrate": 0.16602316602316602,
+      "num_round_trades": 259
+    },
+    {
+      "basket": "BTCUSDT_ETHUSDT",
+      "slice": "slice_2023H2_2024H1",
+      "start": "2023-07-01",
+      "end": "2024-06-30",
+      "total_return": 3.196271521502693,
+      "max_drawdown": -0.3600687126301909,
+      "sharpe": 2.1119979616150024,
+      "winrate": 0.16847826086956522,
+      "num_round_trades": 184
+    },
+    {
+      "basket": "BTCUSDT_ETHUSDT",
+      "slice": "slice_2024H2_2025Q1",
+      "start": "2024-07-01",
+      "end": "2025-04-12",
+      "total_return": 0.49446329277867007,
+      "max_drawdown": -0.2559433313976982,
+      "sharpe": 1.1206461175941433,
+      "winrate": 0.23529411764705882,
+      "num_round_trades": 136
+    },
+    {
+      "basket": "BNBUSDT_SOLUSDT",
+      "slice": "slice_2022H1_2023H1",
+      "start": "2022-01-01",
+      "end": "2023-06-30",
+      "total_return": 0.41125907202871104,
+      "max_drawdown": -0.3500300181212066,
+      "sharpe": 0.7089229470020627,
+      "winrate": 0.19215686274509805,
+      "num_round_trades": 255
+    },
+    {
+      "basket": "BNBUSDT_SOLUSDT",
+      "slice": "slice_2023H2_2024H1",
+      "start": "2023-07-01",
+      "end": "2024-06-30",
+      "total_return": 0.08187666429048224,
+      "max_drawdown": -0.2873405926562671,
+      "sharpe": 0.4013284611807804,
+      "winrate": 0.25,
+      "num_round_trades": 176
+    },
+    {
+      "basket": "BNBUSDT_SOLUSDT",
+      "slice": "slice_2024H2_2025Q1",
+      "start": "2024-07-01",
+      "end": "2025-04-12",
+      "total_return": -0.1997086860697086,
+      "max_drawdown": -0.3671943690296816,
+      "sharpe": -0.6641998153822029,
+      "winrate": 0.22695035460992907,
+      "num_round_trades": 141
+    }
+  ],
+  "perturb_rows": [
+    {
+      "variant": "base",
+      "total_return": 10.241305958499625,
+      "max_drawdown": -0.467573019598556,
+      "sharpe": 1.3969897423218978,
+      "winrate": 0.1835334476843911,
+      "num_round_trades": 583,
+      "y2024": 0.9628036557237931,
+      "y2025": 0.06153805974950055
+    },
+    {
+      "variant": "risk_-10pct",
+      "total_return": 8.529775907120856,
+      "max_drawdown": -0.4434589296711474,
+      "sharpe": 1.376409842501466,
+      "winrate": 0.18010291595197256,
+      "num_round_trades": 583,
+      "y2024": 1.0550155033146091,
+      "y2025": 0.050615626847083206
+    },
+    {
+      "variant": "risk_+10pct",
+      "total_return": 9.759152005979539,
+      "max_drawdown": -0.48853872638879514,
+      "sharpe": 1.3455208631331679,
+      "winrate": 0.18416523235800344,
+      "num_round_trades": 581,
+      "y2024": 0.8088569437926816,
+      "y2025": 0.06458110608442125
+    },
+    {
+      "variant": "stop_-10pct",
+      "total_return": 9.042531518493787,
+      "max_drawdown": -0.4438269866860979,
+      "sharpe": 1.3898564554204613,
+      "winrate": 0.1780821917808219,
+      "num_round_trades": 584,
+      "y2024": 1.0761101021482027,
+      "y2025": 0.050290951838539266
+    },
+    {
+      "variant": "stop_+10pct",
+      "total_return": 9.132125226430178,
+      "max_drawdown": -0.48699946475623435,
+      "sharpe": 1.3281929381669462,
+      "winrate": 0.18384879725085912,
+      "num_round_trades": 582,
+      "y2024": 0.7703639977219099,
+      "y2025": 0.05940199609139185
+    },
+    {
+      "variant": "trail_-10pct",
+      "total_return": 12.1281791399437,
+      "max_drawdown": -0.46059511102591466,
+      "sharpe": 1.4849920815800257,
+      "winrate": 0.18537414965986396,
+      "num_round_trades": 588,
+      "y2024": 1.216601661825886,
+      "y2025": 0.09827699517880983
+    },
+    {
+      "variant": "trail_+10pct",
+      "total_return": 10.430071639871322,
+      "max_drawdown": -0.4851083392165253,
+      "sharpe": 1.397028269814905,
+      "winrate": 0.17482517482517482,
+      "num_round_trades": 572,
+      "y2024": 1.0533213847406984,
+      "y2025": 0.033478425462587724
+    },
+    {
+      "variant": "confirm_relax",
+      "total_return": 11.366128776989225,
+      "max_drawdown": -0.5287092521108536,
+      "sharpe": 1.3013213922945908,
+      "winrate": 0.15415549597855227,
+      "num_round_trades": 746,
+      "y2024": 2.1544484423636,
+      "y2025": -0.026349849294161176
+    },
+    {
+      "variant": "confirm_strict",
+      "total_return": 5.474782733548221,
+      "max_drawdown": -0.4586006625509209,
+      "sharpe": 1.2682168602825836,
+      "winrate": 0.1864754098360656,
+      "num_round_trades": 488,
+      "y2024": 0.5623807364621969,
+      "y2025": 0.12224350281181318
+    }
+  ]
+}

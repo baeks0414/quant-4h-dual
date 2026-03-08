@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "quant"
+version = "0.2.0"
+requires-python = ">=3.10"
+dependencies = [
+  "pandas",
+  "numpy",
+  "requests",
+  "python-dotenv",
+]
+
+[project.scripts]
+quant-backtest = "quant.cli.backtest:main"
+quant-live = "quant.cli.live:main"
+quant-paper = "quant.cli.paper:main"
+quant-real = "quant.cli.real:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
