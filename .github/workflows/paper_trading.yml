@@ -29,15 +29,15 @@ jobs:
       - name: Install dependencies
         run: pip install -e . --quiet
 
-      - name: Run paper trading
-        run: python scripts/paper_live_run.py
+      - name: Run paper trading (realtime stateful)
+        run: python scripts/paper_live_stateful.py
 
       - name: Commit results
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add results/paper_live/
+          git add results/paper_live_rt/
           # 변경사항이 있을 때만 커밋
-          git diff --cached --quiet || git commit -m "📊 paper live update $(date -u +'%Y-%m-%d %H:%M UTC')"
+          git diff --cached --quiet || git commit -m "📊 paper live RT $(date -u +'%Y-%m-%d %H:%M UTC')"
           git push
 
