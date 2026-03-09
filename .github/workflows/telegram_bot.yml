@@ -1,0 +1,41 @@
+name: Telegram Bot
+
+on:
+  schedule:
+    # 5분마다 실행 - 텔레그램 명령어 확인
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+jobs:
+  bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install requests pandas --quiet
+
+      - name: Run bot
+        run: python scripts/telegram_bot.py
+        env:
+          TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+      - name: Save bot state
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add results/paper_live_rt/bot_state.json
+          git diff --cached --quiet || git commit -m "🤖 bot state update"
+          git push
