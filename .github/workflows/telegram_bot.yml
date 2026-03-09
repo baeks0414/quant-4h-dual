@@ -2,8 +2,8 @@ name: Telegram Bot
 
 on:
   schedule:
-    # 5분마다 실행 - 텔레그램 명령어 확인
-    - cron: "*/5 * * * *"
+    # 15분마다 실행 - 텔레그램 명령어 확인 (5분→15분: Actions 사용량 절감)
+    - cron: "*/15 * * * *"
   workflow_dispatch:
 
 jobs:

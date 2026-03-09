@@ -62,6 +62,7 @@ MAX_RETRIES    = 3            # 바이낸스 API 재시도 횟수
 RETRY_DELAY    = 10           # 재시도 초기 대기 시간 (초, 지수 백오프)
 OUTDIR         = ROOT / "results" / "paper_live_rt"
 STATE_PATH     = OUTDIR / "state.json"
+STATE_BACKUP   = OUTDIR / "state_backup.json"   # live_start 유실 대비 백업
 TRADES_PATH    = OUTDIR / "trades.csv"
 EQUITY_PATH    = OUTDIR / "equity_curve.csv"
 LOG_PATH       = OUTDIR / "run_log.csv"
@@ -166,8 +167,21 @@ def main() -> None:
     symbols  = list(trend_cfg.symbols)
     interval = trend_cfg.interval
 
-    # ── 이전 상태 로드 ────────────────────────────────────────────────
-    state         = load_state(str(STATE_PATH))
+    # ── 이전 상태 로드 (백업에서 복구 포함) ──────────────────────────
+    state = load_state(str(STATE_PATH))
+
+    # state.json이 비어있거나 live_start가 없으면 백업에서 복구 시도
+    if "live_start" not in state and STATE_BACKUP.exists():
+        backup = load_state(str(STATE_BACKUP))
+        if "live_start" in backup:
+            print("[RECOVER] state.json에 live_start 없음 → 백업에서 복구")
+            state["live_start"] = backup["live_start"]
+            tg_send(
+                f"⚠️ <b>상태 복구</b>\n"
+                f"state.json 손상 감지 → 백업에서 live_start 복구\n"
+                f"live_start: {backup['live_start']}"
+            )
+
     last_bar_time: pd.Timestamp | None = None
     live_start:    pd.Timestamp | None = None
     is_first_run  = "live_start" not in state
@@ -370,6 +384,13 @@ def main() -> None:
     state["final_equity"]     = round(final_eq, 2)
     state["total_return"]     = round(total_ret, 6)
     save_state_atomic(str(STATE_PATH), state)
+
+    # live_start 백업 (절대 변하지 않는 값만 저장)
+    backup = load_state(str(STATE_BACKUP))
+    if "live_start" not in backup and live_start:
+        backup["live_start"] = str(live_start)
+        save_state_atomic(str(STATE_BACKUP), backup)
+        print(f"[BACKUP] live_start 백업 저장: {live_start}")
 
     # ── 콘솔 출력 ─────────────────────────────────────────────────────
     print("\n" + "=" * 65)
