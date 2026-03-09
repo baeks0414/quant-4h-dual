@@ -31,6 +31,9 @@ jobs:
 
       - name: Run paper trading (realtime stateful)
         run: python scripts/paper_live_stateful.py
+        env:
+          TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
       - name: Commit results
         run: |
