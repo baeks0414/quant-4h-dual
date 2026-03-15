@@ -302,6 +302,26 @@ def main() -> None:
 
     if live_start is not None and not all_trades.empty and "time" in all_trades.columns:
         live_trades = all_trades[all_trades["time"] > live_start].copy()
+
+        # ── 워밍업 포지션 상속 필터링 ─────────────────────────────────
+        # 청산 거래 중 진입이 live_start 이전(워밍업)에 이루어진 것은 제외
+        _CLOSING = {"EXIT", "STOP_LONG", "STOP_SHORT", "CLOSE_BY_SIGNAL", "FLIP_CLOSE"}
+        _ENTRY   = {"ENTRY_LONG", "ENTRY_SHORT", "PYRAMID_LONG", "PYRAMID_SHORT"}
+        _live_entries = live_trades[live_trades["type"].isin(_ENTRY)]
+
+        def _is_live_trade(row) -> bool:
+            if row["type"] not in _CLOSING:
+                return True  # 진입/펀딩은 모두 유효
+            ep = row.get("entry")
+            if ep is None or pd.isna(ep):
+                return True
+            matched = _live_entries[
+                (_live_entries["symbol"] == row["symbol"]) &
+                (_live_entries["entry"].sub(float(ep)).abs() < 1.0)
+            ]
+            return not matched.empty  # 매칭 ENTRY 없으면 워밍업 포지션 청산 → 제외
+
+        live_trades = live_trades[live_trades.apply(_is_live_trade, axis=1)].copy()
     else:
         live_trades = pd.DataFrame()
 
