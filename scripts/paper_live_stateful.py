@@ -454,6 +454,32 @@ def main() -> None:
         }
         sym_short = {"BTCUSDT": "BTC", "ETHUSDT": "ETH"}
 
+        # 홀딩 기간 계산용: 심볼+진입가 기준으로 가장 최근 ENTRY 시각 조회
+        def find_hold_hours(tr_row, all_live: pd.DataFrame) -> str | None:
+            t_type = str(tr_row.get("type", ""))
+            if t_type not in ("EXIT", "STOP_LONG", "STOP_SHORT", "CLOSE_BY_SIGNAL", "FLIP_CLOSE"):
+                return None
+            sym = tr_row.get("symbol")
+            ep  = tr_row.get("entry")
+            if ep is None or pd.isna(ep):
+                return None
+            ep_f = float(ep)
+            entries = all_live[
+                all_live["symbol"].eq(sym) &
+                all_live["type"].isin(["ENTRY_LONG", "ENTRY_SHORT", "PYRAMID_LONG", "PYRAMID_SHORT"]) &
+                (all_live["entry"].sub(ep_f).abs() < 1.0)
+            ]
+            if entries.empty:
+                return None
+            entry_time = pd.to_datetime(entries["time"].min(), utc=True)
+            exit_time  = pd.to_datetime(tr_row.get("time"), utc=True)
+            delta = exit_time - entry_time
+            total_h = int(delta.total_seconds() // 3600)
+            if total_h >= 24:
+                d, h = divmod(total_h, 24)
+                return f"{d}d {h}h" if h else f"{d}d"
+            return f"{total_h}h"
+
         new_trade_str = ""
         if len(new_trades) > 0:
             lines = [f"\n🔔 <b>신규 거래 {len(new_trades)}건</b>"]
@@ -466,12 +492,15 @@ def main() -> None:
                 pnl  = float(tr.get("pnl", 0)) if tr.get("pnl") is not None else 0.0
                 entry_p = tr.get("entry")
                 exit_p  = tr.get("exit")
+                hold    = find_hold_hours(tr, live_trades)
 
                 line = f"  [{strat}] {sym} {label}"
                 if entry_p is not None and not pd.isna(entry_p):
                     line += f"\n    진입가: ${float(entry_p):,.2f}"
                 if has_exit and exit_p is not None and not pd.isna(exit_p):
                     line += f" → 청산가: ${float(exit_p):,.2f}"
+                if hold:
+                    line += f"  ⏱ {hold}"
                 if qty > 0:
                     notional = qty * float(entry_p if entry_p else 0)
                     line += f"\n    수량: {qty:.4f} {sym}  (≈${notional:,.0f})"
