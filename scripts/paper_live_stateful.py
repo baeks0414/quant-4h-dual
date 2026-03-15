@@ -291,7 +291,11 @@ def main() -> None:
     t_res = t_engine.result()
     s_res = s_engine.result()
 
-    all_trades = pd.concat([t_res.trades, s_res.trades], ignore_index=True)
+    t_trades_df = t_res.trades.copy()
+    s_trades_df = s_res.trades.copy()
+    t_trades_df["strategy"] = "Trend"
+    s_trades_df["strategy"] = "Sleeve"
+    all_trades = pd.concat([t_trades_df, s_trades_df], ignore_index=True)
     if not all_trades.empty and "time" in all_trades.columns:
         all_trades["time"] = pd.to_datetime(all_trades["time"], utc=True)
         all_trades = all_trades.sort_values("time").reset_index(drop=True)
@@ -434,7 +438,49 @@ def main() -> None:
         )
     else:
         ret_icon = "📈" if total_ret >= 0 else "📉"
-        new_trade_str = f"\n🔔 신규 거래: {len(new_trades)}건" if len(new_trades) > 0 else ""
+
+        # ── 신규 거래 상세 ─────────────────────────────────────────────
+        type_label = {
+            "ENTRY_LONG":    ("🟢 롱 진입",   False),
+            "ENTRY_SHORT":   ("🔴 숏 진입",   False),
+            "PYRAMID_LONG":  ("🟢 롱 추가",   False),
+            "PYRAMID_SHORT": ("🔴 숏 추가",   False),
+            "EXIT":          ("✅ 익절 청산",  True),
+            "STOP_LONG":     ("🛑 롱 손절",   True),
+            "STOP_SHORT":    ("🛑 숏 손절",   True),
+            "CLOSE_BY_SIGNAL":("⚡ 시그널 청산", True),
+            "FLIP_CLOSE":    ("🔄 반전 청산",  True),
+            "FUNDING":       ("💸 펀딩비",     False),
+        }
+        sym_short = {"BTCUSDT": "BTC", "ETHUSDT": "ETH"}
+
+        new_trade_str = ""
+        if len(new_trades) > 0:
+            lines = [f"\n🔔 <b>신규 거래 {len(new_trades)}건</b>"]
+            for _, tr in new_trades.iterrows():
+                t_type = str(tr.get("type", ""))
+                label, has_exit = type_label.get(t_type, (t_type, False))
+                sym  = sym_short.get(str(tr.get("symbol", "")), str(tr.get("symbol", "")))
+                strat = str(tr.get("strategy", ""))
+                qty  = float(tr.get("qty", 0))
+                pnl  = float(tr.get("pnl", 0)) if tr.get("pnl") is not None else 0.0
+                entry_p = tr.get("entry")
+                exit_p  = tr.get("exit")
+
+                line = f"  [{strat}] {sym} {label}"
+                if entry_p is not None and not pd.isna(entry_p):
+                    line += f"\n    진입가: ${float(entry_p):,.2f}"
+                if has_exit and exit_p is not None and not pd.isna(exit_p):
+                    line += f" → 청산가: ${float(exit_p):,.2f}"
+                if qty > 0:
+                    notional = qty * float(entry_p if entry_p else 0)
+                    line += f"\n    수량: {qty:.4f} {sym}  (≈${notional:,.0f})"
+                if has_exit or t_type == "FUNDING":
+                    pnl_icon = "💰" if pnl >= 0 else "💸"
+                    line += f"\n    손익: {pnl_icon} <b>${pnl:+,.2f}</b>"
+                lines.append(line)
+            new_trade_str = "\n" + "\n".join(lines)
+
         tg_msg = (
             f"{ret_icon} <b>Paper Trading 업데이트</b>\n"
             f"📅 {now_utc}\n"
