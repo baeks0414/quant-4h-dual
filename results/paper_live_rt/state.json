@@ -1,13 +1,13 @@
 {
-  "final_equity": 9859.0,
-  "last_bar_time": "2026-03-15 00:00:00+00:00",
+  "final_equity": 9909.34,
+  "last_bar_time": "2026-03-15 04:00:00+00:00",
   "live_start": "2026-03-08 16:00:00+00:00",
   "market_regime": "STRONG_TREND",
   "sleeve_positions": {
     "BTCUSDT": "LONG",
     "ETHUSDT": "LONG"
   },
-  "total_return": -0.0141,
+  "total_return": -0.009066,
   "trend_positions": {
     "BTCUSDT": "LONG",
     "ETHUSDT": "LONG"
