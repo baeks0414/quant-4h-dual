@@ -52,6 +52,11 @@ from quant.execution.paper_broker import PaperBroker
 from quant.strategies.wrappers import MarketRegimeGate, MarketRegimeGateConfig
 from quant.strategies.your_strategy import YourStrategy
 from quant.util.state import load_state, save_state_atomic
+from quant.util.telegram_metrics import (
+    build_recent_trade_hold_text,
+    find_trade_hold_duration,
+    format_duration_between,
+)
 
 # ── 상수 ─────────────────────────────────────────────────────────────
 INITIAL_EQUITY = 10_000.0
@@ -88,6 +93,42 @@ def tg_send(text: str) -> None:
 
 def _ms(ts: pd.Timestamp) -> int:
     return int(ts.timestamp() * 1000)
+
+
+def _filter_live_trades(live_trades: pd.DataFrame) -> pd.DataFrame:
+    """Drop inherited warmup closes while keeping real post-live pyramided closes."""
+    if live_trades.empty or "type" not in live_trades.columns:
+        return live_trades.copy()
+
+    closing = {"EXIT", "STOP_LONG", "STOP_SHORT", "CLOSE_BY_SIGNAL", "FLIP_CLOSE"}
+    entry = {"ENTRY_LONG", "ENTRY_SHORT", "PYRAMID_LONG", "PYRAMID_SHORT"}
+    open_after_live: dict[tuple[str, str], bool] = {}
+    keep_idx = []
+
+    ordered = live_trades.sort_values("time") if "time" in live_trades.columns else live_trades
+    for idx, row in ordered.iterrows():
+        trade_type = str(row.get("type", ""))
+        key = (str(row.get("strategy", "")), str(row.get("symbol", "")))
+
+        if trade_type in entry:
+            open_after_live[key] = True
+            keep_idx.append(idx)
+            continue
+
+        if trade_type in closing:
+            entry_px = row.get("entry")
+            has_unknown_entry = entry_px is None or pd.isna(entry_px)
+            if open_after_live.get(key, False) or has_unknown_entry:
+                keep_idx.append(idx)
+                open_after_live[key] = False
+            continue
+
+        keep_idx.append(idx)
+
+    filtered = live_trades.loc[keep_idx]
+    if "time" in filtered.columns:
+        filtered = filtered.sort_values("time")
+    return filtered.reset_index(drop=True)
 
 
 def _build_strategy(cfg):
@@ -304,24 +345,9 @@ def main() -> None:
         live_trades = all_trades[all_trades["time"] > live_start].copy()
 
         # ── 워밍업 포지션 상속 필터링 ─────────────────────────────────
-        # 청산 거래 중 진입이 live_start 이전(워밍업)에 이루어진 것은 제외
-        _CLOSING = {"EXIT", "STOP_LONG", "STOP_SHORT", "CLOSE_BY_SIGNAL", "FLIP_CLOSE"}
-        _ENTRY   = {"ENTRY_LONG", "ENTRY_SHORT", "PYRAMID_LONG", "PYRAMID_SHORT"}
-        _live_entries = live_trades[live_trades["type"].isin(_ENTRY)]
-
-        def _is_live_trade(row) -> bool:
-            if row["type"] not in _CLOSING:
-                return True  # 진입/펀딩은 모두 유효
-            ep = row.get("entry")
-            if ep is None or pd.isna(ep):
-                return True
-            matched = _live_entries[
-                (_live_entries["symbol"] == row["symbol"]) &
-                (_live_entries["entry"].sub(float(ep)).abs() < 1.0)
-            ]
-            return not matched.empty  # 매칭 ENTRY 없으면 워밍업 포지션 청산 → 제외
-
-        live_trades = live_trades[live_trades.apply(_is_live_trade, axis=1)].copy()
+        # 피라미딩 청산은 entry가 가중평균가로 기록되므로 가격 매칭 대신
+        # live_start 이후 전략/심볼별 포지션 라이프사이클로 판정한다.
+        live_trades = _filter_live_trades(live_trades)
     else:
         live_trades = pd.DataFrame()
 
@@ -329,6 +355,9 @@ def main() -> None:
         new_trades = live_trades[live_trades["time"] > last_bar_time]
     else:
         new_trades = live_trades
+
+    live_elapsed = format_duration_between(live_start, latest_bar) if live_start is not None else None
+    recent_trade_hold = build_recent_trade_hold_text(live_trades, latest_bar)
 
     # ── equity curve: live_start 기준으로 정규화 ──────────────────────
     t_ec = t_res.equity_curve[["equity"]].copy()
@@ -389,6 +418,8 @@ def main() -> None:
         "sharpe":          round(sharpe, 6),
         "num_live_trades": len(live_trades),
         "new_trades":      len(new_trades),
+        "live_elapsed":    live_elapsed or "",
+        "recent_trade_hold": recent_trade_hold or "",
         "trend_pos_BTC":   t_positions.get("BTCUSDT", "FLAT"),
         "trend_pos_ETH":   t_positions.get("ETHUSDT", "FLAT"),
         "sleeve_pos_BTC":  s_positions.get("BTCUSDT", "FLAT"),
@@ -407,6 +438,8 @@ def main() -> None:
     state["market_regime"]    = str(t_regime)
     state["final_equity"]     = round(final_eq, 2)
     state["total_return"]     = round(total_ret, 6)
+    state["live_elapsed"]     = live_elapsed or ""
+    state["recent_trade_hold"] = recent_trade_hold or ""
     save_state_atomic(str(STATE_PATH), state)
 
     # live_start 백업 (절대 변하지 않는 값만 저장)
@@ -420,10 +453,12 @@ def main() -> None:
     print("\n" + "=" * 65)
     print(f"  [결과]{'  [첫 실행 - 앞으로 이 시점부터 추적]' if is_first_run else ''}")
     print(f"  페이퍼 시작 : {live_start}")
-    print(f"  최신 봉     : {latest_bar}")
+    print(f"  최신 봉     : {latest_bar}
     print(f"  BTC 레짐    : {t_regime}")
     print(f"  Trend 포지션: {t_positions}")
     print(f"  Sleeve 포지션: {s_positions}")
+    print(f"  실행 누적   : {live_elapsed or '-'}")
+    print(f"  최근 홀딩   : {recent_trade_hold or '-'}")
     print(f"  ─────────────────────────────────────────────────────")
     if is_first_run:
         print(f"  수익률/MDD  : (다음 봉부터 집계 시작)")
@@ -454,6 +489,8 @@ def main() -> None:
             f"<b>Sleeve (30%)</b>\n"
             f"  BTC: {pos_icon.get(s_positions.get('BTCUSDT','FLAT'), '⚪')} {s_positions.get('BTCUSDT','FLAT')}\n"
             f"  ETH: {pos_icon.get(s_positions.get('ETHUSDT','FLAT'), '⚪')} {s_positions.get('ETHUSDT','FLAT')}\n\n"
+            f"⏱ 실행 누적: {live_elapsed or '-'}\n"
+            f"⏱ 최근 거래 홀딩: {recent_trade_hold or '없음'}\n\n"
             f"다음 봉부터 수익 집계 시작 💰"
         )
     else:
@@ -474,32 +511,6 @@ def main() -> None:
         }
         sym_short = {"BTCUSDT": "BTC", "ETHUSDT": "ETH"}
 
-        # 홀딩 기간 계산용: 심볼+진입가 기준으로 가장 최근 ENTRY 시각 조회
-        def find_hold_hours(tr_row, all_live: pd.DataFrame) -> str | None:
-            t_type = str(tr_row.get("type", ""))
-            if t_type not in ("EXIT", "STOP_LONG", "STOP_SHORT", "CLOSE_BY_SIGNAL", "FLIP_CLOSE"):
-                return None
-            sym = tr_row.get("symbol")
-            ep  = tr_row.get("entry")
-            if ep is None or pd.isna(ep):
-                return None
-            ep_f = float(ep)
-            entries = all_live[
-                all_live["symbol"].eq(sym) &
-                all_live["type"].isin(["ENTRY_LONG", "ENTRY_SHORT", "PYRAMID_LONG", "PYRAMID_SHORT"]) &
-                (all_live["entry"].sub(ep_f).abs() < 1.0)
-            ]
-            if entries.empty:
-                return None
-            entry_time = pd.to_datetime(entries["time"].min(), utc=True)
-            exit_time  = pd.to_datetime(tr_row.get("time"), utc=True)
-            delta = exit_time - entry_time
-            total_h = int(delta.total_seconds() // 3600)
-            if total_h >= 24:
-                d, h = divmod(total_h, 24)
-                return f"{d}d {h}h" if h else f"{d}d"
-            return f"{total_h}h"
-
         new_trade_str = ""
         if len(new_trades) > 0:
             lines = [f"\n🔔 <b>신규 거래 {len(new_trades)}건</b>"]
@@ -512,7 +523,7 @@ def main() -> None:
                 pnl  = float(tr.get("pnl", 0)) if tr.get("pnl") is not None else 0.0
                 entry_p = tr.get("entry")
                 exit_p  = tr.get("exit")
-                hold    = find_hold_hours(tr, live_trades)
+                hold    = find_trade_hold_duration(tr, live_trades, reference_time=latest_bar)
 
                 line = f"  [{strat}] {sym} {label}"
                 if entry_p is not None and not pd.isna(entry_p):
@@ -542,6 +553,8 @@ def main() -> None:
             f"  BTC: {pos_icon.get(s_positions.get('BTCUSDT','FLAT'), '⚪')} {s_positions.get('BTCUSDT','FLAT')}\n"
             f"  ETH: {pos_icon.get(s_positions.get('ETHUSDT','FLAT'), '⚪')} {s_positions.get('ETHUSDT','FLAT')}\n"
             f"─────────────────\n"
+            f"⏱ 실행 누적: {live_elapsed or '-'}\n"
+            f"⏱ 최근 거래 홀딩: {recent_trade_hold or '없음'}\n"
             f"💰 수익률: <b>{total_ret*100:+.2f}%</b>  (${final_eq:,.0f})\n"
             f"📊 MDD: {mdd*100:.2f}%  |  Sharpe: {sharpe:.2f}\n"
             f"📋 누적 거래: {len(live_trades)}건{new_trade_str}"
