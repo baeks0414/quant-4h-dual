@@ -33,10 +33,6 @@ ALLOWED_CHAT_IDS = {
 }
 
 ROOT       = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "src"))
-
-from quant.util.telegram_metrics import build_recent_trade_hold_text, format_duration_between
-
 STATE_PATH = ROOT / "results" / "paper_live_rt" / "state.json"
 LOG_PATH   = ROOT / "results" / "paper_live_rt" / "run_log.csv"
 TRADES_PATH= ROOT / "results" / "paper_live_rt" / "trades.csv"
@@ -186,15 +182,6 @@ def _build_status_message() -> str:
     trend_positions = state.get("trend_positions", {})
     sleeve_positions = state.get("sleeve_positions", {})
     run_time = log.get("run_time")
-    live_elapsed = str(state.get("live_elapsed") or log.get("live_elapsed") or "").strip()
-    recent_trade_hold = str(state.get("recent_trade_hold") or log.get("recent_trade_hold") or "").strip()
-    if not live_elapsed:
-        live_elapsed = format_duration_between(live_start, latest) or ""
-    if not recent_trade_hold and TRADES_PATH.exists():
-        try:
-            recent_trade_hold = build_recent_trade_hold_text(pd.read_csv(TRADES_PATH), latest) or ""
-        except Exception:
-            recent_trade_hold = ""
     recent_trades = _load_recent_trade_lines(limit=3)
 
     ret_icon = "📈" if ret >= 0 else "📉"
@@ -215,8 +202,6 @@ def _build_status_message() -> str:
         "",
         f"🕐 시작: {live_start}",
         f"🕐 최신 봉: {latest}",
-        f"⏱ 실행 누적: {live_elapsed or '-'}",
-        f"⏱ 최근 거래 홀딩: {recent_trade_hold or '없음'}",
     ]
     if run_time:
         lines.append(f"🔄 최근 점검: {run_time}")
