@@ -453,7 +453,7 @@ def main() -> None:
     print("\n" + "=" * 65)
     print(f"  [결과]{'  [첫 실행 - 앞으로 이 시점부터 추적]' if is_first_run else ''}")
     print(f"  페이퍼 시작 : {live_start}")
-    print(f"  최신 봉     : {latest_bar}
+    print(f"  최신 봉     : {latest_bar}")
     print(f"  BTC 레짐    : {t_regime}")
     print(f"  Trend 포지션: {t_positions}")
     print(f"  Sleeve 포지션: {s_positions}")
