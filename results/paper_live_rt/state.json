@@ -1,9 +1,9 @@
 {
   "final_equity": 9267.43,
-  "last_bar_time": "2026-06-13 20:00:00+00:00",
+  "last_bar_time": "2026-06-14 04:00:00+00:00",
   "live_elapsed": "51d 20h",
   "live_start": "2026-03-08 16:00:00+00:00",
-  "market_regime": "STRONG_TREND_BEAR",
+  "market_regime": "STRONG_TREND",
   "recent_trade_hold": "BTC STOP_SHORT 16h",
   "sleeve_positions": {
     "BTCUSDT": "FLAT",
