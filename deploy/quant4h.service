@@ -1,0 +1,14 @@
+[Unit]
+Description=quant-4h-dual real-money runner (one shot per 4h bar)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=quant
+WorkingDirectory=/opt/quant-4h-dual
+EnvironmentFile=/etc/quant4h.env
+ExecStart=/opt/quant-4h-dual/.venv/bin/python scripts/live_real.py
+StandardOutput=append:/var/log/quant4h/run.log
+StandardError=append:/var/log/quant4h/run.log
+TimeoutStartSec=900

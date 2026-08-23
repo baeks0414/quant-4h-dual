@@ -1,0 +1,12 @@
+[Unit]
+Description=Fire the 4h dual-sleeve runner 2 minutes after each bar close
+
+[Timer]
+# 4h Binance bars close at 00,04,08,12,16,20 UTC. A VPS timer fires on time,
+# unlike GitHub Actions cron which was measured running 34-66 minutes late.
+OnCalendar=*-*-* 00,04,08,12,16,20:02:00 UTC
+Persistent=true
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target
