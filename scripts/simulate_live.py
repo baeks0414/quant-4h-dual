@@ -43,13 +43,18 @@ L.notify = lambda *a, **k: None
 
 
 def run(wallet, positions, *, state=None, real_capital=700.0,
-        max_order=None, max_gross=None, leverage=20.0, available=None):
+        max_order=None, max_gross=None, leverage=20.0, available=None,
+        other_assets=None, include_collateral=False, coin_px=None):
     """Run main() once against a fake account, returning (log, plan, state)."""
     L.STATE.unlink(missing_ok=True)
     if state is not None:
         L.STATE.write_text(json.dumps(state), encoding="utf-8")
 
     # live_real reads these at call time, so the environment is the knob
+    if include_collateral:
+        os.environ["INCLUDE_COLLATERAL"] = "1"
+    else:
+        os.environ.pop("INCLUDE_COLLATERAL", None)
     for name, val in (("MAX_ORDER_USD", max_order),
                       ("MAX_GROSS_USD", max_gross),
                       ("REAL_CAPITAL", real_capital)):
@@ -62,6 +67,9 @@ def run(wallet, positions, *, state=None, real_capital=700.0,
     L.Futures.available_usdt = lambda self: float(
         wallet if available is None else available)
     L.Futures.positions = lambda self: dict(positions)
+    L.Futures.other_assets = lambda self: dict(other_assets or {})
+    L.Futures.total_usd = lambda self: float(wallet) + sum(
+        q * (coin_px or 0.0) for q in (other_assets or {}).values())
     L.Futures.risk = lambda self: {
         s: {"leverage": float(leverage), "margin": "cross"}
         for s in ("BTCUSDT", "ETHUSDT")}
@@ -167,6 +175,42 @@ def main() -> None:
     log, plan, st = run(700.0, {}, leverage=20.0)
     check("no margin objection", "would refuse" not in log)
     check("leverage reported", "20x" in log)
+
+    print("\n9c. a coin parked in the futures wallet is called out")
+    log, plan, st = run(700.0, {}, other_assets={"BTC": 0.0029})
+    check("non-USDT collateral warned about", "non-USDT assets" in log)
+    check("the coin is named", "0.0029 BTC" in log)
+    check("orders still planned", len(plan) == 1)
+
+    print("\n9d. INCLUDE_COLLATERAL folds the coin into capital and position")
+    coin = 0.0029
+    off_log, off_plan, _ = run(159.78, {}, other_assets={"BTC": coin},
+                               real_capital=None, coin_px=mid)
+    on_log, on_plan, _ = run(159.78, {}, other_assets={"BTC": coin},
+                             real_capital=None, coin_px=mid,
+                             include_collateral=True)
+    total = 159.78 + coin * mid
+    check("off: sizes against USDT only", "sizing=159.78" in off_log)
+    check("off: warns about the coin", "non-USDT assets" in off_log)
+    check("on: sizes against the whole wallet", f"sizing={total:.2f}" in on_log)
+    check("on: counts the coin as an open position",
+          "counting 0.0029 BTC of collateral" in on_log)
+    off_n = off_plan[0]["notional"] if off_plan else 0.0
+    on_n = on_plan[0]["notional"] if on_plan else 0.0
+    check("on: buys only the difference", 0 < on_n < off_n,
+          f"off {off_n:,.2f} -> on {on_n:,.2f} USD")
+    want_total = tgt * total
+    check("on: total exposure lands on target",
+          abs(coin * mid + on_n - want_total) <= lot,
+          f"coin {coin * mid:,.2f} + leg {on_n:,.2f} vs target {want_total:,.2f}")
+
+    print("\n9e. collateral above target -- the leg shorts against it")
+    big = 0.020
+    log, plan, st = run(159.78, {}, other_assets={"BTC": big}, real_capital=None,
+                        coin_px=mid, include_collateral=True)
+    o = orders_of(plan)
+    got = o[0]["side"] if o else "no order"
+    check("sells rather than buys", len(o) == 1 and got == "SELL", got)
 
     print("\n10. wallet below the kill floor, with a baseline on record")
     log, plan, st = run(300.0, {}, state={"baseline_equity": 700.0})

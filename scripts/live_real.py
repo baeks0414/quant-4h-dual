@@ -306,6 +306,24 @@ class Futures:
                 return float(a.get(field) or 0)
         return 0.0
 
+    def total_usd(self) -> float:
+        """USD value of every asset in the futures wallet, coins included.
+
+        In multi-assets mode this is the number that describes the account; the
+        USDT balance alone describes only part of it."""
+        return float(self._account().get("totalWalletBalance") or 0)
+
+    def other_assets(self) -> dict:
+        """Non-USDT balances sitting in the futures wallet.
+
+        These are collateral, not positions, so positions() never reports them
+        and the reconciliation is blind to them. A coin held here carries full
+        price risk that no part of this runner governs."""
+        return {a["asset"]: float(a.get("walletBalance") or 0)
+                for a in self._account().get("assets", [])
+                if a.get("asset") != "USDT"
+                and abs(float(a.get("walletBalance") or 0)) > 1e-8}
+
     def available_usdt(self) -> float:
         return self._asset_usdt("availableBalance")
 
@@ -475,7 +493,33 @@ def main() -> None:
         raise SystemExit("BINANCE_API_KEY / BINANCE_API_SECRET not set")
 
     ex = Futures(key, sec)
-    wallet = ex.wallet_usdt()
+    usdt = ex.wallet_usdt()
+    try:
+        others = ex.other_assets()
+    except Exception:  # noqa: BLE001
+        others = {}
+
+    # A coin in the futures wallet is collateral, not a position: it never
+    # reaches positions(), so by default the strategy is blind to it and builds
+    # its exposure on top.
+    #
+    # INCLUDE_COLLATERAL folds it in instead. Economically a coin balance is a
+    # long already open, so counting it as capital AND as a position held means
+    # the runner trades only the difference, and total exposure lands where the
+    # strategy asked. That is what the backtest describes -- it is a statement
+    # about total exposure, not about how the exposure was assembled.
+    INCLUDE = os.environ.get("INCLUDE_COLLATERAL", "0") == "1"
+    wallet = ex.total_usd() if INCLUDE else usdt
+    if INCLUDE:
+        log(f"INCLUDE_COLLATERAL on: capital is the whole wallet "
+            f"{wallet:.2f} USD, not the {usdt:.2f} USDT alone")
+    elif others:
+        log("WARNING: the futures wallet holds non-USDT assets: "
+            + ", ".join(f"{v:g} {k}" for k, v in sorted(others.items())))
+        log("  These are collateral, not positions. The strategy cannot see "
+            "them and will open its own exposure on top; the kill switch reads "
+            "the USDT balance and will not react if they fall. Convert them to "
+            "USDT, move them out, or set INCLUDE_COLLATERAL=1 to fold them in.")
 
     st = json.loads(STATE.read_text(encoding="utf-8")) if STATE.exists() else {}
     # The baseline is recorded once, on the first live run, so the kill switch
@@ -543,6 +587,20 @@ def main() -> None:
 
     rules = ex.rules()
     actual = ex.positions()
+
+    # Fold each coin balance into the position for its USDT pair. The futures
+    # leg then reconciles the TOTAL, which is what makes the coin governed: when
+    # the strategy wants less exposure than the coin already gives, the leg goes
+    # short against it rather than the coin being left to run.
+    if INCLUDE and others:
+        for sym in set(frac) | set(rules):
+            if not sym.endswith("USDT"):
+                continue
+            qty = others.get(sym[:-4], 0.0)
+            if abs(qty) > 1e-12:
+                actual[sym] = actual.get(sym, 0.0) + qty
+                log(f"  counting {qty:g} {sym[:-4]} of collateral as an open "
+                    f"{sym} position")
     plan, gross = [], 0.0
 
     for sym in sorted(set(frac) | set(actual)):
