@@ -4,19 +4,21 @@ Run the real-money runner locally against the real Binance account, read-only.
 
     python scripts/run_local.py
 
-Credentials are read from a file sitting NEXT TO this repository folder, not
-inside it -- on this machine that is the Desktop:
+Credentials are read from quant4h.env in the project root:
 
-    C:\\Users\\...\\Desktop\\quant4h.env      (beside quant_4h_1\\)
+    quant_4h_1\\quant4h.env
 
 containing exactly:
 
     BINANCE_API_KEY=...
     BINANCE_API_SECRET=...
 
-Outside the working tree means outside version control, so it cannot be added to
-a commit by accident, and it never appears in shell history the way an inline
-export does. Set QUANT4H_ENV to read it from somewhere else.
+That path is inside a repository whose remote is public, so before reading it
+this script asks git whether the file is ignored and refuses to run if it is
+not. The *.env rule in .gitignore is what makes it safe; the check is there
+because a rule can be edited away and a leaked key cannot be recalled.
+
+Set QUANT4H_ENV to read the file from somewhere else.
 
 DRY_RUN is forced on and cannot be overridden here. This script reads the wallet
 and the open positions, computes the plan, and stops. Live trading belongs on
@@ -26,16 +28,15 @@ asleep at 04:02 UTC is not a place to hold real positions from.
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-# Beside the repository folder, never inside it. ROOT.parent is the directory
-# holding quant_4h_1, which on this machine is the Desktop. The older locations
-# are still accepted so an existing file keeps working.
-PREFERRED = ROOT.parent / "quant4h.env"
+PREFERRED = ROOT / "quant4h.env"
 CANDIDATES = [PREFERRED,
+              ROOT.parent / "quant4h.env",
               ROOT.parent / ".quant4h.env",
               Path(os.path.expanduser("~")) / ".quant4h.env"]
 
@@ -44,7 +45,40 @@ ENV = Path(_override) if _override else next(
     (p for p in CANDIDATES if p.exists()), PREFERRED)
 
 
+def assert_not_committable(path: Path) -> None:
+    """Refuse to read credentials that git would happily commit.
+
+    The remote for this repository is public. A file inside the tree is only
+    safe while .gitignore keeps ignoring it, which is a condition worth checking
+    on every run rather than assuming: rules get edited, and a key that reaches
+    a public remote has to be treated as burnt even if the commit is reverted.
+    """
+    try:
+        path.relative_to(ROOT)
+    except ValueError:
+        return                      # outside the tree, nothing to check
+
+    try:
+        rc = subprocess.run(["git", "-C", str(ROOT), "check-ignore", "-q", str(path)],
+                            capture_output=True, timeout=15).returncode
+    except (OSError, subprocess.SubprocessError) as exc:
+        sys.exit(f"cannot verify that {path.name} is git-ignored ({exc}).\n"
+                 f"Move it outside {ROOT.name}\\ or set QUANT4H_ENV.")
+
+    if rc == 0:
+        return                      # ignored
+    if rc == 128:
+        return                      # not a git repository at all
+    sys.exit(
+        f"REFUSING TO READ {path}\n\n"
+        f"git does not ignore this file, and this repository's remote is public.\n"
+        f"Committing it would publish your API key.\n\n"
+        f"Add a rule to .gitignore:   {path.name}\n"
+        f"or move the file out of {ROOT.name}\\ and point QUANT4H_ENV at it.")
+
+
 def load_env() -> None:
+    assert_not_committable(ENV)
     if not ENV.exists():
         sys.exit(
             f"credentials file not found: {ENV}\n\n"
@@ -52,8 +86,8 @@ def load_env() -> None:
             f"    BINANCE_API_KEY=...\n"
             f"    BINANCE_API_SECRET=...\n\n"
             f"    notepad \"{PREFERRED}\"\n\n"
-            f"Put it beside the repository folder, not inside it -- anything\n"
-            f"inside {ROOT.name} is under version control.")
+            f"The .env suffix matters: it is what .gitignore matches, and this\n"
+            f"script refuses to read a credentials file git would commit.")
     bad = []
     for n, raw in enumerate(ENV.read_text(encoding="utf-8-sig").splitlines(), 1):
         line = raw.strip()
