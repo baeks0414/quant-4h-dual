@@ -308,6 +308,13 @@ class Futures:
             out[s["symbol"]] = d
         return out
 
+    def open_orders(self, sym: str | None = None) -> list:
+        return self._signed("GET", "/fapi/v1/openOrders",
+                            {"symbol": sym} if sym else {})
+
+    def cancel_all(self, sym: str):
+        return self._signed("DELETE", "/fapi/v1/allOpenOrders", {"symbol": sym})
+
     def book(self, sym: str):
         d = self.public("/fapi/v1/ticker/bookTicker", {"symbol": sym})
         return float(d["bidPrice"]), float(d["askPrice"])
@@ -399,13 +406,36 @@ def execute(ex: Futures, sym: str, side: str, qty: Decimal, r: dict) -> dict:
             break
 
     filled = float(st.get("executedQty") or 0)
+    known = True
     if st.get("status") not in ("FILLED", "CANCELED", "EXPIRED", "REJECTED"):
         try:
-            ex.cancel(sym, oid)
-            st = ex.order(sym, oid)
-            filled = float(st.get("executedQty") or 0)
+            receipt = ex.cancel(sym, oid)
+            try:
+                st = ex.order(sym, oid)
+                filled = float(st.get("executedQty") or 0)
+            except Exception as exc:  # noqa: BLE001
+                # The cancel receipt carries executedQty as well, and it is the
+                # only record of the fill left when the status endpoint is
+                # unreachable. Ignoring it and taking the full size at market
+                # buys the filled portion a second time.
+                log(f"    status unreadable after cancel ({exc}); "
+                    f"using the cancel receipt")
+                st = receipt
+                filled = float(receipt.get("executedQty") or 0)
         except Exception as exc:  # noqa: BLE001
             log(f"    cancel failed: {exc}")
+            known = False
+
+    if not known:
+        # Neither the status nor the cancel could be read, so the fill could be
+        # anything from nothing to the whole order. Topping up at market would
+        # risk doubling the position. Doing nothing cannot: the next run
+        # reconciles against the actual exchange position and closes the gap.
+        log("    FILL UNKNOWN -- order status and cancel both failed. Sending "
+            "nothing further; the next run reconciles from the real position.")
+        notify(f"{sym} {side}: fill unknown, nothing further sent. "
+               f"Check for a resting order.")
+        return {"mode": "unknown", "maker_qty": None, "status": "UNKNOWN"}
 
     if filled > 0:
         log(f"    maker filled {filled}")
@@ -540,6 +570,19 @@ def main() -> None:
     if DRY_RUN:
         log("DRY RUN — nothing sent. Set DRY_RUN=0 to trade.")
     else:
+        # A resting order left by an earlier run would fill on top of the
+        # position this plan was computed from, which is exactly the assumption
+        # reconciliation depends on. Clear the slate before sending anything.
+        try:
+            stale = {o["symbol"] for o in ex.open_orders()}
+            for sym in sorted(stale):
+                ex.cancel_all(sym)
+                log(f"  cleared resting order(s) on {sym}")
+        except Exception as exc:  # noqa: BLE001
+            log(f"  ABORTING: could not verify open orders are clear: {exc}")
+            notify("aborted: could not clear resting orders -- " + str(exc))
+            return
+
         for p in plan:
             try:
                 res = execute(ex, p["symbol"], p["side"], p["qty"], p["rules"])
