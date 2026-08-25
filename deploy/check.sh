@@ -50,7 +50,20 @@ say "settings"
 printf '   DRY_RUN=%s  REAL_CAPITAL=%s  KILL_DRAWDOWN=%s\n' \
   "${DRY_RUN:-unset}" "${REAL_CAPITAL:-unset}" "${KILL_DRAWDOWN:-unset}"
 printf '   MAX_ORDER_USD=%s  MAX_GROSS_USD=%s  LIMIT_WAIT_SEC=%s\n' \
-  "${MAX_ORDER_USD:-unset}" "${MAX_GROSS_USD:-unset}" "${LIMIT_WAIT_SEC:-unset}"
+  "${MAX_ORDER_USD:-scales with capital}" "${MAX_GROSS_USD:-scales with capital}" \
+  "${LIMIT_WAIT_SEC:-unset}"
+
+# A fixed order cap below the capital refuses every entry. It reads as a prudent
+# setting and behaves as an off switch, so it is worth failing on rather than
+# warning about: nothing would trade and the log would still look healthy.
+CAP=${REAL_CAPITAL:-0}
+if [ -n "${MAX_ORDER_USD:-}" ] && [ "$CAP" != "0" ] \
+   && [ "$(awk -v a="$MAX_ORDER_USD" -v b="$CAP" 'BEGIN{print (a<b)?1:0}')" = "1" ]; then
+  bad "MAX_ORDER_USD=$MAX_ORDER_USD is below REAL_CAPITAL=$CAP"
+  printf '        this strategy takes positions near 100%% of capital, so every\n'
+  printf '        entry would be refused. Delete the MAX_ORDER_USD line from\n'
+  printf '        %s and let the cap scale with capital.\n' "$ENV_FILE"
+fi
 [ "${DRY_RUN:-1}" = "1" ] && ok "DRY_RUN is on — no orders will be sent" \
                           || warn "DRY_RUN is OFF — this configuration TRADES REAL MONEY"
 

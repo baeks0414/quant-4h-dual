@@ -39,8 +39,12 @@ Env:
     KILL_DRAWDOWN      fraction below the starting wallet that halts trading,
                        measured from a baseline recorded on the first live run.
                        Default 0.35
-    MAX_ORDER_USD      refuse any single order above this. Default 300.
-    MAX_GROSS_USD      refuse to trade if target gross exceeds this. Default 2000.
+    MAX_ORDER_MULT     refuse any single order above this multiple of the
+                       capital in use. Default 2.0 -- a full reversal is 2x.
+    MAX_GROSS_MULT     refuse to trade if the target book exceeds this multiple
+                       of the capital in use. Default 3.0.
+    MAX_ORDER_USD      absolute override for MAX_ORDER_MULT, in USD. Unset by
+    MAX_GROSS_USD      default; a fixed cap stops scaling once capital moves.
     LIMIT_WAIT_SEC     how long to rest as a maker before taking. Default 90.
     TELEGRAM_TOKEN / TELEGRAM_CHAT_ID
 """
@@ -67,8 +71,12 @@ import requests
 
 DRY_RUN = os.environ.get("DRY_RUN", "1") != "0"
 KILL_DRAWDOWN = float(os.environ.get("KILL_DRAWDOWN", "0.35"))
-MAX_ORDER_USD = float(os.environ.get("MAX_ORDER_USD", "300"))
-MAX_GROSS_USD = float(os.environ.get("MAX_GROSS_USD", "2000"))
+# Order caps are read inside main(), because they are derived from the capital
+# actually in use. A fixed dollar cap looks prudent and is not: this strategy
+# holds up to about 100% of capital in one leg, so a 300 USD cap on a 700 USD
+# account refused every entry it ever tried to make, silently, forever.
+MAX_ORDER_MULT = 2.0    # a reversal is twice the position, so 2x is the floor
+MAX_GROSS_MULT = 3.0
 LIMIT_WAIT_SEC = int(os.environ.get("LIMIT_WAIT_SEC", "90"))
 POLL_SEC = 5
 
@@ -450,8 +458,16 @@ def main() -> None:
                 f"minimum will be skipped. Transfer USDT if you meant {capital:.0f}.")
         capital = wallet
 
+    max_order = float(os.environ.get("MAX_ORDER_USD") or MAX_ORDER_MULT * capital)
+    max_gross = float(os.environ.get("MAX_GROSS_USD") or MAX_GROSS_MULT * capital)
+
     log(f"mode={'DRY RUN' if DRY_RUN else 'LIVE'}  wallet={wallet:.2f} USDT  "
         f"baseline={baseline:.2f}  floor={floor_equity:.2f}  sizing={capital:.2f}")
+    log(f"caps: order {max_order:.2f} USD, gross {max_gross:.2f} USD")
+    if max_order < capital:
+        log(f"WARNING: the order cap {max_order:.2f} is below the capital "
+            f"{capital:.2f}. This strategy takes positions near 100% of capital, "
+            f"so entries will be refused. Raise or unset MAX_ORDER_USD.")
 
     if st.get("killed_at"):
         log(f"kill switch tripped at {st['killed_at']}; refusing to resume. "
@@ -501,16 +517,16 @@ def main() -> None:
         if notional < float(r.get("minn", 0)):
             log(f"  {sym}: {notional:.2f} below minNotional {r.get('minn')}, skipping")
             continue
-        if notional > MAX_ORDER_USD:
-            log(f"  {sym}: REFUSED, {notional:.2f} over MAX_ORDER_USD {MAX_ORDER_USD}")
-            notify(f"order refused {sym} ${notional:.0f} over cap ${MAX_ORDER_USD:.0f}")
+        if notional > max_order:
+            log(f"  {sym}: REFUSED, {notional:.2f} over the order cap {max_order:.2f}")
+            notify(f"order refused {sym} ${notional:.0f} over cap ${max_order:.0f}")
             continue
         plan.append({"symbol": sym, "side": "BUY" if delta > 0 else "SELL",
                      "qty": q, "notional": notional, "rules": r,
                      "have": have_qty, "want": want_qty})
 
-    if gross > MAX_GROSS_USD:
-        msg = f"target gross {gross:.0f} over MAX_GROSS_USD {MAX_GROSS_USD:.0f}"
+    if gross > max_gross:
+        msg = f"target gross {gross:.0f} over the gross cap {max_gross:.0f}"
         log(f"REFUSED: {msg}")
         notify(f"refused: {msg}")
         return
@@ -537,6 +553,7 @@ def main() -> None:
     (RESULTS / f"run_{stamp}.json").write_text(json.dumps({
         "bar": str(bar), "dry_run": DRY_RUN, "wallet": wallet,
         "baseline": baseline, "capital": capital, "kill_floor": floor_equity,
+        "max_order": max_order, "max_gross": max_gross,
         "target_fraction": frac, "detail": detail, "actual": actual,
         "plan": [{k: (fmt(v) if isinstance(v, Decimal) else v)
                   for k, v in p.items() if k != "rules"} for p in plan],
