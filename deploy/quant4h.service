@@ -8,6 +8,10 @@ Type=oneshot
 User=quant
 WorkingDirectory=/opt/quant-4h-dual
 EnvironmentFile=/etc/quant4h.env
+# systemd hands a service no locale, so Python would pick ASCII for stdout
+# and any non-ASCII text from the exchange could abort a run mid-flight.
+Environment=PYTHONIOENCODING=utf-8
+Environment=PYTHONUNBUFFERED=1
 ExecStart=/opt/quant-4h-dual/.venv/bin/python scripts/live_real.py
 StandardOutput=append:/var/log/quant4h/run.log
 StandardError=append:/var/log/quant4h/run.log

@@ -95,7 +95,18 @@ TAPI = "https://testnet.binancefuture.com" if TESTNET else FAPI
 
 
 def log(m):
-    print(f"[{datetime.now(timezone.utc):%Y-%m-%d %H:%M:%S}] {m}", flush=True)
+    line = f"[{datetime.now(timezone.utc):%Y-%m-%d %H:%M:%S}] {m}"
+    try:
+        print(line, flush=True)
+    except UnicodeEncodeError:
+        # A console that cannot encode a character must not end the run. The
+        # crash would land between sending orders and writing state, leaving
+        # the exchange and this process disagreeing about what happened --
+        # the one inconsistency the whole reconciliation design exists to
+        # avoid. Exchange error text is not ours to control, so degrade the
+        # message instead of the run.
+        enc = sys.stdout.encoding or "ascii"
+        print(line.encode(enc, "replace").decode(enc, "replace"), flush=True)
 
 
 def notify(text: str) -> None:
@@ -692,7 +703,7 @@ def main() -> None:
 
     sent = []
     if DRY_RUN:
-        log("DRY RUN — nothing sent. Set DRY_RUN=0 to trade.")
+        log("DRY RUN -- nothing sent. Set DRY_RUN=0 to trade.")
         if margin_short:
             log(f"NOTE: a live run would refuse -- {margin_short}")
     elif margin_short:
