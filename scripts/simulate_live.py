@@ -44,7 +44,8 @@ L.notify = lambda *a, **k: None
 
 def run(wallet, positions, *, state=None, real_capital=700.0,
         max_order=None, max_gross=None, leverage=20.0, available=None,
-        other_assets=None, include_collateral=False, coin_px=None):
+        other_assets=None, include_collateral=False, coin_px=None,
+        hedge_mode=False):
     """Run main() once against a fake account, returning (log, plan, state)."""
     L.STATE.unlink(missing_ok=True)
     if state is not None:
@@ -68,6 +69,9 @@ def run(wallet, positions, *, state=None, real_capital=700.0,
         wallet if available is None else available)
     L.Futures.positions = lambda self: dict(positions)
     L.Futures.other_assets = lambda self: dict(other_assets or {})
+    L.Futures._signed = lambda self, m, path, params=None: (
+        {"dualSidePosition": bool(hedge_mode)}
+        if "positionSide" in path else {})
     L.Futures.total_usd = lambda self: float(wallet) + sum(
         q * (coin_px or 0.0) for q in (other_assets or {}).values())
     L.Futures.risk = lambda self: {
@@ -211,6 +215,11 @@ def main() -> None:
     o = orders_of(plan)
     got = o[0]["side"] if o else "no order"
     check("sells rather than buys", len(o) == 1 and got == "SELL", got)
+
+    print("\n9f. Hedge mode -- every order would be rejected")
+    log, plan, st = run(700.0, {}, hedge_mode=True)
+    check("refuses outright", "Hedge mode" in log)
+    check("nothing planned", len(plan) == 0)
 
     print("\n10. wallet below the kill floor, with a baseline on record")
     log, plan, st = run(300.0, {}, state={"baseline_equity": 700.0})

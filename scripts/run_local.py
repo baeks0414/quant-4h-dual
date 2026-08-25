@@ -20,10 +20,18 @@ because a rule can be edited away and a leaked key cannot be recalled.
 
 Set QUANT4H_ENV to read the file from somewhere else.
 
-DRY_RUN is forced on and cannot be overridden here. This script reads the wallet
-and the open positions, computes the plan, and stops. Live trading belongs on
-the server, where the systemd timer runs it on the bar; a laptop that may be
-asleep at 04:02 UTC is not a place to hold real positions from.
+Against production, DRY_RUN is forced on and cannot be overridden: the script
+reads the wallet and the open positions, computes the plan, and stops. Real
+trading belongs on the server, where the systemd timer runs it on the bar; a
+laptop that may be asleep at 04:02 UTC is not a place to hold real positions
+from.
+
+    BINANCE_TESTNET=1 DRY_RUN=0    place real orders on the Binance futures
+                                   testnet, with testnet funds and testnet keys
+
+That combination is the only way to exercise order placement -- post-only
+acceptance, client order id format, partial fills, cancels -- which no dry run
+ever reaches.
 """
 from __future__ import annotations
 
@@ -111,26 +119,35 @@ def load_env() -> None:
 def main() -> None:
     load_env()
 
-    # Not negotiable, and set before live_real is imported because it reads
-    # DRY_RUN at import time.
-    os.environ["DRY_RUN"] = "1"
+    # Live orders from a workstation are allowed against the testnet and
+    # nowhere else. Order placement is the one path a dry run never reaches, so
+    # it has to be exercised somewhere, and play money is the place. Against
+    # production this stays a rehearsal.
+    testnet = os.environ.get("BINANCE_TESTNET") == "1"
+    if not testnet:
+        os.environ["DRY_RUN"] = "1"
+    elif os.environ.get("DRY_RUN") == "0":
+        print("BINANCE_TESTNET=1 and DRY_RUN=0: this WILL place orders on the"
+              + chr(10) + "Binance futures testnet, using testnet funds."
+              + chr(10))
 
     sys.path.insert(0, str(ROOT / "src"))
     sys.path.insert(0, str(ROOT / "scripts"))
     import live_real as L
 
-    if not L.DRY_RUN:
-        sys.exit("refusing to run: DRY_RUN did not take effect")
+    if not L.DRY_RUN and not L.TESTNET:
+        sys.exit("refusing to run: live orders are only allowed on the testnet")
 
     # keep local runs out of the server's result directory
-    L.RESULTS = ROOT / "results" / "live_local"
+    L.RESULTS = ROOT / "results" / ("live_testnet" if testnet else "live_local")
     L.RESULTS.mkdir(parents=True, exist_ok=True)
     L.STATE = L.RESULTS / "state.json"
     L.notify = lambda *a, **k: None      # no Telegram noise from a laptop
 
     print(f"credentials: {ENV}")
     print(f"results:     {L.RESULTS}")
-    print("mode:        DRY RUN (forced)\n")
+    print(f"endpoint:    {L.TAPI}")
+    print(f"mode:        {'LIVE (testnet)' if not L.DRY_RUN else 'DRY RUN'}\n")
 
     try:
         L.main()

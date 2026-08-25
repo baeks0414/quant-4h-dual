@@ -61,6 +61,19 @@ def main() -> None:
         on = None
         print(f"  could not read multi-assets mode: {exc}")
 
+    print("\n=== position mode ===")
+    try:
+        dual = bool(ex._signed("GET", "/fapi/v1/positionSide/dual")
+                    .get("dualSidePosition"))
+        if dual:
+            print("  HEDGE -- the runner sends One-way orders, so every order")
+            print("  would be rejected with -4061. Switch Position Mode to")
+            print("  One-way in the Binance futures preferences.")
+        else:
+            print("  one-way (what the runner requires)")
+    except Exception as exc:  # noqa: BLE001
+        print(f"  could not read position mode: {exc}")
+
     print("\n=== open positions (what the runner reconciles) ===")
     risk = ex._signed("GET", "/fapi/v2/positionRisk")
     open_pos = [r for r in risk if abs(float(r.get("positionAmt") or 0)) > 0]

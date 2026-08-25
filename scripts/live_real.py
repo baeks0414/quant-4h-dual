@@ -85,6 +85,14 @@ RESULTS.mkdir(parents=True, exist_ok=True)
 STATE = RESULTS / "state.json"
 FAPI = "https://fapi.binance.com"
 
+# Where orders go. The testnet speaks the same API with play money, which is the
+# only way to exercise order placement -- post-only acceptance, client order id
+# format, partial fills, cancels -- without risking anything. Market data for the
+# replay always comes from production: testnet candles are synthetic and would
+# produce a target that means nothing.
+TESTNET = os.environ.get("BINANCE_TESTNET") == "1"
+TAPI = "https://testnet.binancefuture.com" if TESTNET else FAPI
+
 
 def log(m):
     print(f"[{datetime.now(timezone.utc):%Y-%m-%d %H:%M:%S}] {m}", flush=True)
@@ -269,13 +277,13 @@ class Futures:
         qs = self._url.urlencode(p, doseq=True)
         p["signature"] = self._hm.new(self.secret.encode(), qs.encode(),
                                       self._h.sha256).hexdigest()
-        r = self.s.request(method, FAPI + path, params=p, timeout=20)
+        r = self.s.request(method, TAPI + path, params=p, timeout=20)
         if r.status_code >= 400:
             raise RuntimeError(f"{r.status_code} {r.text}")
         return r.json()
 
     def public(self, path, params=None):
-        r = self.s.get(FAPI + path, params=params or {}, timeout=20)
+        r = self.s.get(TAPI + path, params=params or {}, timeout=20)
         r.raise_for_status()
         return r.json()
 
@@ -554,6 +562,9 @@ def main() -> None:
     max_order = float(os.environ.get("MAX_ORDER_USD") or MAX_ORDER_MULT * capital)
     max_gross = float(os.environ.get("MAX_GROSS_USD") or MAX_GROSS_MULT * capital)
 
+    if TESTNET:
+        log("BINANCE_TESTNET=1 -- orders go to the testnet, market data to "
+            "production")
     log(f"mode={'DRY RUN' if DRY_RUN else 'LIVE'}  wallet={wallet:.2f} USDT  "
         f"baseline={baseline:.2f}  floor={floor_equity:.2f}  sizing={capital:.2f}")
     log(f"caps: order {max_order:.2f} USD, gross {max_gross:.2f} USD")
@@ -561,6 +572,21 @@ def main() -> None:
         log(f"WARNING: the order cap {max_order:.2f} is below the capital "
             f"{capital:.2f}. This strategy takes positions near 100% of capital, "
             f"so entries will be refused. Raise or unset MAX_ORDER_USD.")
+
+    # Orders carry no positionSide, which One-way mode does not need and Hedge
+    # mode requires. In Hedge mode every order comes back -4061, so this is a
+    # precondition worth failing on rather than discovering one order at a time.
+    try:
+        if bool(ex._signed("GET", "/fapi/v1/positionSide/dual")
+                .get("dualSidePosition")):
+            log("REFUSING: the account is in Hedge mode. This runner sends "
+                "One-way orders and every one of them would be rejected "
+                "(-4061). Switch Position Mode to One-way in the Binance "
+                "futures preferences.")
+            notify("refused: account is in Hedge mode, orders would be rejected")
+            return
+    except Exception as exc:  # noqa: BLE001
+        log(f"could not read position mode: {exc}")
 
     if st.get("killed_at"):
         log(f"kill switch tripped at {st['killed_at']}; refusing to resume. "
