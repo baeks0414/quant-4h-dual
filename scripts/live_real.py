@@ -32,8 +32,13 @@ SAFETY
 Env:
     BINANCE_API_KEY / BINANCE_API_SECRET   futures trading only, NO withdrawal
     DRY_RUN            "1" (default) logs orders without sending. "0" trades.
-    REAL_CAPITAL       notional the strategy sizes against. Default: wallet.
-    KILL_DRAWDOWN      fraction below baseline that halts trading. Default 0.35
+    REAL_CAPITAL       ceiling on the notional the strategy sizes against.
+                       Sizing follows the wallet and never exceeds it, so this
+                       only matters when you want to commit part of the account.
+                       Default: the wallet balance.
+    KILL_DRAWDOWN      fraction below the starting wallet that halts trading,
+                       measured from a baseline recorded on the first live run.
+                       Default 0.35
     MAX_ORDER_USD      refuse any single order above this. Default 300.
     MAX_GROSS_USD      refuse to trade if target gross exceeds this. Default 2000.
     LIMIT_WAIT_SEC     how long to rest as a maker before taking. Default 90.
@@ -416,10 +421,17 @@ def main() -> None:
     wallet = ex.wallet_usdt()
 
     st = json.loads(STATE.read_text(encoding="utf-8")) if STATE.exists() else {}
-    # baseline is recorded once so the kill switch measures drawdown from where
-    # trading began, not from a moving reference that resets after every loss
-    baseline = float(st.get("baseline_equity")
-                     or os.environ.get("REAL_CAPITAL") or wallet)
+    # The baseline is recorded once, on the first live run, so the kill switch
+    # measures drawdown from where trading began rather than from a moving
+    # reference that resets after every loss.
+    #
+    # It is read from the WALLET, never from REAL_CAPITAL. Those are different
+    # quantities: REAL_CAPITAL is the notional the strategy sizes against, while
+    # the wallet is what the account actually holds. An account that has not been
+    # funded yet has a small wallet and a large REAL_CAPITAL, and taking the
+    # baseline from the latter made that look like a 96% loss -- latching the
+    # kill switch before a single order had ever been placed.
+    baseline = float(st.get("baseline_equity") or wallet)
     capital = float(os.environ.get("REAL_CAPITAL", wallet))
     floor_equity = baseline * (1.0 - KILL_DRAWDOWN)
 
@@ -433,12 +445,32 @@ def main() -> None:
     if wallet < floor_equity:
         msg = (f"wallet {wallet:.2f} below the {KILL_DRAWDOWN:.0%} drawdown floor "
                f"{floor_equity:.2f} (baseline {baseline:.2f})")
+        if DRY_RUN:
+            # A rehearsal must leave no trace. Latching here would halt the live
+            # system on the strength of a run that never sent an order.
+            log(f"KILL SWITCH would trip: {msg}  (dry run, not latched)")
+            return
         log(f"KILL SWITCH: {msg}")
         notify(f"KILL SWITCH TRIPPED\n{msg}\nNo further orders will be placed.")
         st["killed_at"] = str(pd.Timestamp.now(tz="UTC"))
         st["baseline_equity"] = baseline
         STATE.write_text(json.dumps(st, indent=2), encoding="utf-8")
         return
+
+    # REAL_CAPITAL is a CEILING, not a fixed notional. The backtest compounds --
+    # position size follows equity -- so the wallet is the honest figure to size
+    # against, and REAL_CAPITAL only lets you commit a part of the account.
+    #
+    # Letting it exceed the wallet would be leverage taken by accident: a 700 USD
+    # book on a 29 USD wallet is 23x. Clamping rather than refusing matters after
+    # a loss, too. A fixed 700 with a wallet at 500 would refuse every order,
+    # freezing the book at exactly the point where it most needs to de-risk.
+    if capital > wallet:
+        if capital > wallet * 1.05:
+            log(f"NOTE: REAL_CAPITAL {capital:.2f} exceeds the futures wallet "
+                f"{wallet:.2f}; sizing against the wallet. Legs below the exchange "
+                f"minimum will be skipped. Transfer USDT if you meant {capital:.0f}.")
+        capital = wallet
 
     frac, bar, detail = desired_positions()
     log(f"decision bar {bar}   target "
@@ -511,11 +543,18 @@ def main() -> None:
         "sent": sent,
     }, indent=2, default=str), encoding="utf-8")
 
-    st.update({"baseline_equity": baseline, "last_bar": str(bar),
-               "last_wallet": wallet, "last_run": stamp})
-    STATE.write_text(json.dumps(st, indent=2), encoding="utf-8")
+    if DRY_RUN:
+        # A rehearsal records nothing. In particular it must not record a
+        # baseline: that number anchors the kill switch for the life of the
+        # account, and a dry run made before the wallet is funded would anchor
+        # it to the wrong figure permanently.
+        log(f"state.json left untouched (dry run); plan saved as run_{stamp}.json")
+    else:
+        st.update({"baseline_equity": baseline, "last_bar": str(bar),
+                   "last_wallet": wallet, "last_run": stamp})
+        STATE.write_text(json.dumps(st, indent=2), encoding="utf-8")
 
-    dd = wallet / baseline - 1.0
+    dd = wallet / baseline - 1.0 if baseline > 0 else 0.0
     notify(f"<b>DUAL 4H {'DRY' if DRY_RUN else 'LIVE'}</b>\n{bar}\n"
            f"wallet ${wallet:,.2f} ({dd:+.1%} vs baseline)\n"
            f"orders {len(plan)}" + (f" | sent {len(sent)}" if not DRY_RUN else ""))
