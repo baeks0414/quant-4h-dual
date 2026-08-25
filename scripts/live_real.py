@@ -435,6 +435,21 @@ def main() -> None:
     capital = float(os.environ.get("REAL_CAPITAL", wallet))
     floor_equity = baseline * (1.0 - KILL_DRAWDOWN)
 
+    # REAL_CAPITAL is a CEILING, not a fixed notional. The backtest compounds --
+    # position size follows equity -- so the wallet is the honest figure to size
+    # against, and REAL_CAPITAL only lets you commit a part of the account.
+    #
+    # Letting it exceed the wallet would be leverage taken by accident: a 700 USD
+    # book on a 29 USD wallet is 23x. Clamping rather than refusing matters after
+    # a loss, too. A fixed 700 with a wallet at 500 would refuse every order,
+    # freezing the book at exactly the point where it most needs to de-risk.
+    if capital > wallet:
+        if capital > wallet * 1.05:
+            log(f"NOTE: REAL_CAPITAL {capital:.2f} exceeds the futures wallet "
+                f"{wallet:.2f}; sizing against the wallet. Legs below the exchange "
+                f"minimum will be skipped. Transfer USDT if you meant {capital:.0f}.")
+        capital = wallet
+
     log(f"mode={'DRY RUN' if DRY_RUN else 'LIVE'}  wallet={wallet:.2f} USDT  "
         f"baseline={baseline:.2f}  floor={floor_equity:.2f}  sizing={capital:.2f}")
 
@@ -456,21 +471,6 @@ def main() -> None:
         st["baseline_equity"] = baseline
         STATE.write_text(json.dumps(st, indent=2), encoding="utf-8")
         return
-
-    # REAL_CAPITAL is a CEILING, not a fixed notional. The backtest compounds --
-    # position size follows equity -- so the wallet is the honest figure to size
-    # against, and REAL_CAPITAL only lets you commit a part of the account.
-    #
-    # Letting it exceed the wallet would be leverage taken by accident: a 700 USD
-    # book on a 29 USD wallet is 23x. Clamping rather than refusing matters after
-    # a loss, too. A fixed 700 with a wallet at 500 would refuse every order,
-    # freezing the book at exactly the point where it most needs to de-risk.
-    if capital > wallet:
-        if capital > wallet * 1.05:
-            log(f"NOTE: REAL_CAPITAL {capital:.2f} exceeds the futures wallet "
-                f"{wallet:.2f}; sizing against the wallet. Legs below the exchange "
-                f"minimum will be skipped. Transfer USDT if you meant {capital:.0f}.")
-        capital = wallet
 
     frac, bar, detail = desired_positions()
     log(f"decision bar {bar}   target "
