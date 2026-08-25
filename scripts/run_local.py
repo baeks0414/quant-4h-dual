@@ -4,18 +4,19 @@ Run the real-money runner locally against the real Binance account, read-only.
 
     python scripts/run_local.py
 
-Credentials are read from a file OUTSIDE this repository:
+Credentials are read from a file sitting NEXT TO this repository folder, not
+inside it -- on this machine that is the Desktop:
 
-    Windows   %USERPROFILE%\\.quant4h.env
-    otherwise ~/.quant4h.env
+    C:\\Users\\...\\Desktop\\quant4h.env      (beside quant_4h_1\\)
 
 containing exactly:
 
     BINANCE_API_KEY=...
     BINANCE_API_SECRET=...
 
-Keeping it outside the working tree means it cannot be added to a commit by
-accident, and it never appears in shell history the way an inline export does.
+Outside the working tree means outside version control, so it cannot be added to
+a commit by accident, and it never appears in shell history the way an inline
+export does. Set QUANT4H_ENV to read it from somewhere else.
 
 DRY_RUN is forced on and cannot be overridden here. This script reads the wallet
 and the open positions, computes the plan, and stops. Live trading belongs on
@@ -29,8 +30,18 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-ENV = Path(os.environ.get("QUANT4H_ENV")
-           or Path(os.path.expanduser("~")) / ".quant4h.env")
+
+# Beside the repository folder, never inside it. ROOT.parent is the directory
+# holding quant_4h_1, which on this machine is the Desktop. The older locations
+# are still accepted so an existing file keeps working.
+PREFERRED = ROOT.parent / "quant4h.env"
+CANDIDATES = [PREFERRED,
+              ROOT.parent / ".quant4h.env",
+              Path(os.path.expanduser("~")) / ".quant4h.env"]
+
+_override = os.environ.get("QUANT4H_ENV")
+ENV = Path(_override) if _override else next(
+    (p for p in CANDIDATES if p.exists()), PREFERRED)
 
 
 def load_env() -> None:
@@ -40,8 +51,9 @@ def load_env() -> None:
             f"Create it with two lines and nothing else:\n"
             f"    BINANCE_API_KEY=...\n"
             f"    BINANCE_API_SECRET=...\n\n"
-            f"On Windows:  notepad \"{ENV}\"\n"
-            f"Do not put it inside the repository.")
+            f"    notepad \"{PREFERRED}\"\n\n"
+            f"Put it beside the repository folder, not inside it -- anything\n"
+            f"inside {ROOT.name} is under version control.")
     bad = []
     for n, raw in enumerate(ENV.read_text(encoding="utf-8-sig").splitlines(), 1):
         line = raw.strip()
