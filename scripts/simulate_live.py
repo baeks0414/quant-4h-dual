@@ -43,7 +43,7 @@ L.notify = lambda *a, **k: None
 
 
 def run(wallet, positions, *, state=None, real_capital=700.0,
-        max_order=None, max_gross=None):
+        max_order=None, max_gross=None, leverage=20.0, available=None):
     """Run main() once against a fake account, returning (log, plan, state)."""
     L.STATE.unlink(missing_ok=True)
     if state is not None:
@@ -59,7 +59,12 @@ def run(wallet, positions, *, state=None, real_capital=700.0,
             os.environ[name] = str(val)
 
     L.Futures.wallet_usdt = lambda self: float(wallet)
+    L.Futures.available_usdt = lambda self: float(
+        wallet if available is None else available)
     L.Futures.positions = lambda self: dict(positions)
+    L.Futures.risk = lambda self: {
+        s: {"leverage": float(leverage), "margin": "cross"}
+        for s in ("BTCUSDT", "ETHUSDT")}
 
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
@@ -152,21 +157,32 @@ def main() -> None:
     check("nothing planned", len(plan) == 0)
     check("gross cap logged", "gross cap" in log)
 
-    print("\n9. wallet below the kill floor, with a baseline on record")
+    print("\n9. leverage too low to post margin for the plan")
+    log, plan, st = run(700.0, {}, leverage=1.0, available=100.0)
+    check("the plan is still shown", len(plan) == 1)
+    check("a live run would refuse", "a live run would refuse" in log)
+    check("margin requirement reported", "margin required" in log)
+
+    print("\n9b. ample leverage -- no objection")
+    log, plan, st = run(700.0, {}, leverage=20.0)
+    check("no margin objection", "would refuse" not in log)
+    check("leverage reported", "20x" in log)
+
+    print("\n10. wallet below the kill floor, with a baseline on record")
     log, plan, st = run(300.0, {}, state={"baseline_equity": 700.0})
     check("kill reported", "KILL SWITCH would trip" in log)
     check("NOT latched in a dry run",
           "killed_at" not in L.STATE.read_text(encoding="utf-8"))
     check("no orders", len(plan) == 0)
 
-    print("\n10. wallet above REAL_CAPITAL -- the ceiling holds")
+    print("\n11. wallet above REAL_CAPITAL -- the ceiling holds")
     log, plan, st = run(2000.0, {})
     check("sizing capped at 700", "sizing=700.00" in log)
     o = orders_of(plan)
     check("order sized off 700, not 2000", o and o[0]["notional"] < tgt * 1000,
           f"{o[0]['notional']:,.2f} USD" if o else "")
 
-    print("\n11. REAL_CAPITAL unset -- sizes off the wallet")
+    print("\n12. REAL_CAPITAL unset -- sizes off the wallet")
     log, plan, st = run(450.0, {}, real_capital=None)
     check("sizing follows the wallet", "sizing=450.00" in log)
 

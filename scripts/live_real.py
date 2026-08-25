@@ -287,11 +287,30 @@ class Futures:
                 out[row["symbol"]] = amt
         return out
 
-    def wallet_usdt(self) -> float:
-        for a in self._signed("GET", "/fapi/v2/account").get("assets", []):
+    def risk(self) -> dict:
+        """Leverage and margin mode per symbol, from the same endpoint as
+        positions(). A symbol left on 1x cannot post margin for a position the
+        size of the account, and the only sign of it is a rejected order."""
+        return {row["symbol"]: {"leverage": float(row.get("leverage") or 1),
+                                "margin": row.get("marginType", "?")}
+                for row in self._signed("GET", "/fapi/v2/positionRisk")}
+
+    def _account(self) -> dict:
+        if getattr(self, "_acct", None) is None:
+            self._acct = self._signed("GET", "/fapi/v2/account")
+        return self._acct
+
+    def _asset_usdt(self, field: str) -> float:
+        for a in self._account().get("assets", []):
             if a.get("asset") == "USDT":
-                return float(a.get("walletBalance") or 0)
+                return float(a.get(field) or 0)
         return 0.0
+
+    def available_usdt(self) -> float:
+        return self._asset_usdt("availableBalance")
+
+    def wallet_usdt(self) -> float:
+        return self._asset_usdt("walletBalance")
 
     def rules(self) -> dict:
         out = {}
@@ -566,9 +585,36 @@ def main() -> None:
         log(f"  {p['side']:<4} {p['symbol']:<10} qty={fmt(p['qty']):<12} "
             f"~${p['notional']:8.2f}   (have {p['have']:+.6f} -> want {p['want']:+.6f})")
 
+    # An order is only placeable if the account can post its initial margin,
+    # which depends on the leverage configured for that symbol. Nothing else
+    # here would notice a symbol left on 1x: the order just comes back rejected
+    # at the one moment it matters.
+    margin_short = None
+    if plan:
+        risk = ex.risk()
+        avail = ex.available_usdt()
+        need = 0.0
+        for p in plan:
+            info = risk.get(p["symbol"], {})
+            lev = info.get("leverage") or 1.0
+            m = p["notional"] / lev
+            need += m
+            log(f"  {p['symbol']}: {lev:g}x {info.get('margin', '?')}, "
+                f"margin {m:.2f} USD")
+        log(f"margin required {need:.2f} USDT, available {avail:.2f}")
+        if need > avail:
+            margin_short = (f"the plan needs {need:.2f} USDT of margin, "
+                            f"{avail:.2f} available")
+
     sent = []
     if DRY_RUN:
         log("DRY RUN — nothing sent. Set DRY_RUN=0 to trade.")
+        if margin_short:
+            log(f"NOTE: a live run would refuse -- {margin_short}")
+    elif margin_short:
+        log(f"NOT TRADING: {margin_short}. Raise the leverage on the "
+            f"symbol(s) above, add margin, or reduce size.")
+        notify("not trading, insufficient margin -- " + margin_short)
     else:
         # A resting order left by an earlier run would fill on top of the
         # position this plan was computed from, which is exactly the assumption
