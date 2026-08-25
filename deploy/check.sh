@@ -54,6 +54,27 @@ printf '   MAX_ORDER_USD=%s  MAX_GROSS_USD=%s  LIMIT_WAIT_SEC=%s\n' \
 [ "${DRY_RUN:-1}" = "1" ] && ok "DRY_RUN is on — no orders will be sent" \
                           || warn "DRY_RUN is OFF — this configuration TRADES REAL MONEY"
 
+if [ "$FAILED" -eq 1 ]; then
+  say "line map of $ENV_FILE (values hidden)"
+  awk '{
+    if ($0 ~ /^[[:space:]]*#/ || $0 !~ /=/) next
+    n = index($0, "=")
+    printf "   line %-3d [%s] value length %d\n", NR, substr($0, 1, n-1), length($0) - n
+  }' "$ENV_FILE"
+  cat <<'HINT'
+
+   a variable that reads as EMPTY is almost always one of:
+     - the paste silently dropped the whole value (common over VNC)
+     - the name is misspelled, or has a space before the "="
+     - the line is still commented out with a leading #
+     - the name appears TWICE and the later, empty one wins
+     - the value landed on the following line instead of after the "="
+
+   the bracketed name above is the literal text before the "=", so a trailing
+   space or a typo is visible there.
+HINT
+fi
+
 [ "$FAILED" -eq 1 ] && { printf '\n\033[1;31mfix the failures above before continuing\033[0m\n'; exit 1; }
 
 say "binance authentication"
