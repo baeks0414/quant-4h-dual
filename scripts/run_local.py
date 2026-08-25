@@ -49,7 +49,10 @@ CANDIDATES = [PREFERRED,
               Path(os.path.expanduser("~")) / ".quant4h.env"]
 
 _override = os.environ.get("QUANT4H_ENV")
-ENV = Path(_override) if _override else next(
+# resolve(): a relative override such as "testnet.env" would otherwise fail the
+# relative_to(ROOT) test below and silently skip the git-ignore check, which is
+# the one guard standing between a key and a public remote.
+ENV = Path(_override).resolve() if _override else next(
     (p for p in CANDIDATES if p.exists()), PREFERRED)
 
 
