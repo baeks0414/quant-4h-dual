@@ -252,7 +252,8 @@ def main() -> None:
     print("\n9i. a target too small for one lot is explained, not silent")
     log, plan, st = run(160.0, {}, target=0.17)
     check("no order", len(plan) == 0)
-    check("the reason is logged", "under half a lot" in log)
+    check("the lot fraction is reported", "of a" in log and "lot" in log)
+    check("the inflation and the cap are named", "cap -- skipping" in log)
 
     print("\n9j. the same small target trades once capital is larger")
     log, plan, st = run(700.0, {}, target=0.17)
