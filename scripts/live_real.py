@@ -552,6 +552,24 @@ def main() -> None:
     # baseline from the latter made that look like a 96% loss -- latching the
     # kill switch before a single order had ever been placed.
     baseline = float(st.get("baseline_equity") or wallet)
+
+    # A deposit is not a profit and a withdrawal is not a loss, yet both move
+    # the wallet. Left alone, a deposit leaves the kill switch anchored to the
+    # old, smaller balance: fund an account from 160 to 700 and the floor stays
+    # at 104, so the switch only fires after an 85% loss. The protection stops
+    # existing without anything appearing to go wrong.
+    #
+    # A move this large is not one bar of P&L from a book that is roughly 1x, so
+    # it is read as a transfer and the baseline follows it.
+    last_wallet = float(st.get("last_wallet") or 0)
+    if last_wallet > 0:
+        moved = wallet - last_wallet
+        if abs(moved) > max(last_wallet * 0.20, 1.0):
+            baseline += moved
+            log(f"wallet moved {moved:+.2f} since the last run "
+                f"({last_wallet:.2f} -> {wallet:.2f}), too much for one bar of "
+                f"P&L; treating it as a transfer and moving the kill-switch "
+                f"baseline to {baseline:.2f}")
     capital = float(os.environ.get("REAL_CAPITAL", wallet))
     floor_equity = baseline * (1.0 - KILL_DRAWDOWN)
 
@@ -654,6 +672,14 @@ def main() -> None:
         q = q_round(delta, r["step"])
         notional = float(q) * mid
         if q <= 0:
+            # Rounding to nothing is the commonest reason a run does nothing at
+            # all, and it used to pass in silence: the log said "0 order(s)" and
+            # left the cause to guesswork. It is not a fault -- the adjustment is
+            # smaller than the exchange can express -- but it has to be legible.
+            if abs(delta) > 0:
+                log(f"  {sym}: want {want_qty:+.6f}, have {have_qty:+.6f}; the "
+                    f"{abs(delta) * mid:.2f} USD adjustment is under half a lot "
+                    f"({float(r['step']) * mid:.2f} USD) -- skipping")
             continue
         if q < r["minq"]:
             log(f"  {sym}: delta {delta:+.6f} below minQty {r['minq']}, skipping")

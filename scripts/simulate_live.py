@@ -41,11 +41,23 @@ L.RESULTS, L.STATE = TMP, TMP / "state.json"
 L.DRY_RUN = True
 L.notify = lambda *a, **k: None
 
+# The scenarios assert on sizes, so the target they size has to be fixed. Using
+# whatever the strategy wants right now made the suite fail whenever the market
+# moved -- seven checks broke the day the target fell from 0.82 to 0.17, none of
+# them because of the code. The live target is still printed, and still gets a
+# scenario of its own.
+PINNED = 0.82
+BAR = DETAIL = None
+
+
+def set_target(x):
+    L.desired_positions = lambda: ({"BTCUSDT": x} if x else {}, BAR, DETAIL)
+
 
 def run(wallet, positions, *, state=None, real_capital=700.0,
         max_order=None, max_gross=None, leverage=20.0, available=None,
         other_assets=None, include_collateral=False, coin_px=None,
-        hedge_mode=False):
+        hedge_mode=False, target=None):
     """Run main() once against a fake account, returning (log, plan, state)."""
     L.STATE.unlink(missing_ok=True)
     if state is not None:
@@ -64,6 +76,7 @@ def run(wallet, positions, *, state=None, real_capital=700.0,
         else:
             os.environ[name] = str(val)
 
+    set_target(PINNED if target is None else target)
     L.Futures.wallet_usdt = lambda self: float(wallet)
     L.Futures.available_usdt = lambda self: float(
         wallet if available is None else available)
@@ -103,13 +116,15 @@ def check(name, cond, detail=""):
 
 
 def main() -> None:
+    global BAR, DETAIL
     print("warming the replay (fetches bars and runs the strategy once) ...")
-    frac, bar, detail = L.desired_positions()
-    L.desired_positions = lambda: (frac, bar, detail)
-    print(f"target at bar {bar}: {frac}")
-    print(f"   {detail}\n")
+    live, BAR, DETAIL = L.desired_positions()
+    print(f"live target at bar {BAR}: {live}")
+    print(f"   {DETAIL}")
+    print(f"scenarios are pinned to BTCUSDT {PINNED} so they do not depend "
+          f"on the market\n")
 
-    tgt = frac.get("BTCUSDT", 0.0)
+    tgt = PINNED
     bid, ask = L.Futures("simulated", "simulated").book("BTCUSDT")
     mid = (bid + ask) / 2
     lot = 0.001 * mid
@@ -220,6 +235,34 @@ def main() -> None:
     log, plan, st = run(700.0, {}, hedge_mode=True)
     check("refuses outright", "Hedge mode" in log)
     check("nothing planned", len(plan) == 0)
+
+    print("\n9g. a deposit must move the kill-switch baseline with it")
+    log, plan, st = run(700.0, {},
+                        state={"baseline_equity": 160.0, "last_wallet": 160.0})
+    check("transfer recognised", "treating it as a transfer" in log)
+    check("baseline follows the deposit", "baseline=700.00" in log)
+    check("floor recomputed off the new baseline", "floor=455.00" in log)
+
+    print("\n9h. ordinary P&L must NOT move the baseline")
+    log, plan, st = run(690.0, {},
+                        state={"baseline_equity": 700.0, "last_wallet": 700.0})
+    check("left alone", "treating it as a transfer" not in log)
+    check("baseline unchanged", "baseline=700.00" in log)
+
+    print("\n9i. a target too small for one lot is explained, not silent")
+    log, plan, st = run(160.0, {}, target=0.17)
+    check("no order", len(plan) == 0)
+    check("the reason is logged", "under half a lot" in log)
+
+    print("\n9j. the same small target trades once capital is larger")
+    log, plan, st = run(700.0, {}, target=0.17)
+    check("one order", len(plan) == 1)
+
+    print("\n9k. whatever the strategy actually wants today")
+    live_tgt = live.get("BTCUSDT", 0.0)
+    log, plan, st = run(700.0, {}, target=live_tgt)
+    check("completes without error", "done" in log,
+          f"live target {live_tgt:.4f}, {len(plan)} order(s)")
 
     print("\n10. wallet below the kill floor, with a baseline on record")
     log, plan, st = run(300.0, {}, state={"baseline_equity": 700.0})
