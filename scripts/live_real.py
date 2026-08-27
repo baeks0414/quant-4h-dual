@@ -677,9 +677,15 @@ def main() -> None:
             # left the cause to guesswork. It is not a fault -- the adjustment is
             # smaller than the exchange can express -- but it has to be legible.
             if abs(delta) > 0:
+                step_usd = float(r["step"]) * mid
+                want_usd = abs(delta) * mid
+                up_usd = float((Decimal(str(abs(delta))) / r["step"]).to_integral_value(
+                    rounding=ROUND_UP) * r["step"]) * mid
                 log(f"  {sym}: want {want_qty:+.6f}, have {have_qty:+.6f}; the "
-                    f"{abs(delta) * mid:.2f} USD adjustment is under half a lot "
-                    f"({float(r['step']) * mid:.2f} USD) -- skipping")
+                    f"{want_usd:.2f} USD adjustment is {want_usd / step_usd:.2f} "
+                    f"of a {step_usd:.2f} USD lot, and rounding up to one would "
+                    f"inflate it by {up_usd / want_usd - 1:.0%}, past the "
+                    f"{MAX_ROUND_UP:.0%} cap -- skipping")
             continue
         if q < r["minq"]:
             log(f"  {sym}: delta {delta:+.6f} below minQty {r['minq']}, skipping")

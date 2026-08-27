@@ -23,9 +23,13 @@ bad() { printf '   \033[1;31mFAIL\033[0m %s\n' "$*"; }
 [ -d "$APP_DIR/.git" ] || { bad "$APP_DIR is not a checkout — run setup.sh first"; exit 1; }
 
 say "code"
-BEFORE=$(git -C "$APP_DIR" rev-parse --short HEAD)
-sudo -u quant git -C "$APP_DIR" pull -q --ff-only || { bad "git pull failed"; exit 1; }
-AFTER=$(git -C "$APP_DIR" rev-parse --short HEAD)
+# every git call runs as the owner: git refuses to read a repository owned by
+# someone else ("dubious ownership"), which made the version read fail while the
+# pull succeeded, so the script reported "already at" with no revision at all
+q_git() { sudo -u quant git -C "$APP_DIR" "$@"; }
+BEFORE=$(q_git rev-parse --short HEAD)
+q_git pull -q --ff-only || { bad "git pull failed"; exit 1; }
+AFTER=$(q_git rev-parse --short HEAD)
 [ "$BEFORE" = "$AFTER" ] && ok "already at $AFTER" || ok "$BEFORE -> $AFTER"
 
 say "settings"
