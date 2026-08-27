@@ -10,6 +10,10 @@ WorkingDirectory=/opt/quant-4h-dual
 EnvironmentFile=/etc/quant4h.env
 Environment=PYTHONIOENCODING=utf-8
 Environment=PYTHONUNBUFFERED=1
+# matplotlib insists on a writable config and cache directory. quant is a
+# system account created without a home, so without this it looks in a path
+# it cannot create and the import dies before anything can be replied.
+Environment=MPLCONFIGDIR=/var/log/quant4h/.mpl
 ExecStart=/opt/quant-4h-dual/.venv/bin/python scripts/status_bot.py
 StandardOutput=append:/var/log/quant4h/bot.log
 StandardError=append:/var/log/quant4h/bot.log

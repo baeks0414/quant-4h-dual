@@ -157,6 +157,7 @@ rm -f "$TMP"
 sudo -u quant "$APP_DIR/.venv/bin/pip" install -q -e "$APP_DIR[bot]" \
   && ok "charting installed" || warn "matplotlib missing; /chart will say so"
 
+install -d -o quant -g quant -m 755 /var/log/quant4h/.mpl
 install -m 644 "$APP_DIR/deploy/quant4h-bot.service" /etc/systemd/system/
 install -m 644 "$APP_DIR/deploy/quant4h-bot.timer"   /etc/systemd/system/
 systemctl daemon-reload
