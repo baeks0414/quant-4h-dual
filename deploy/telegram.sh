@@ -35,6 +35,32 @@ Before running this, create the bot in Telegram:
 
 INTRO
 
+say "existing credentials"
+KEEP=0
+# Re-running this to install the bot should not demand the token again. If what
+# is already on file works, offer to keep it and skip straight to the install.
+if [ -n "${TELEGRAM_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
+  HAVE=$(TG="$TELEGRAM_TOKEN" "$PY" - <<'PY'
+import json, os, urllib.request
+try:
+    d = json.load(urllib.request.urlopen(
+        f"https://api.telegram.org/bot{os.environ['TG']}/getMe", timeout=20))
+    print(d["result"]["username"] if d.get("ok") else "ERR")
+except Exception:
+    print("ERR")
+PY
+)
+  if [ "$HAVE" != "ERR" ]; then
+    ok "already set up: @$HAVE, chat $TELEGRAM_CHAT_ID"
+    printf '   keep these and just install the bot? [Y/n]: '
+    read -r A
+    case "$A" in n|N) ;; *) KEEP=1;; esac
+  else
+    warn "the stored token no longer works; asking for a new one"
+  fi
+fi
+
+if [ "$KEEP" -eq 0 ]; then
 say "token"
 printf '   paste the BotFather token (nothing will be shown): '
 IFS= read -rs TOKEN; echo
@@ -132,6 +158,7 @@ if [ "$KB" != "$KA" ]; then
 fi
 chown root:root "$ENV_FILE"; chmod 600 "$ENV_FILE"
 ok "written to $ENV_FILE (previous kept as $ENV_FILE.bak)"
+fi
 
 say "two-way bot"
 APP_DIR=${APP_DIR:-/opt/quant-4h-dual}
