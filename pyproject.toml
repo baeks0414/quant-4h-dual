@@ -13,6 +13,11 @@ dependencies = [
   "python-dotenv",
 ]
 
+[project.optional-dependencies]
+# The Telegram bot draws an equity curve; the trader itself never plots,
+# so matplotlib stays out of the install that places orders.
+bot = ["matplotlib"]
+
 [project.scripts]
 quant-backtest = "quant.cli.backtest:main"
 quant-live = "quant.cli.live:main"

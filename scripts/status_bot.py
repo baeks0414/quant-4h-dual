@@ -8,13 +8,14 @@ nothing to restart, and a crash costs one poll rather than the whole service.
 
 Ground truth comes from the exchange, not from local files. A local ledger can
 disagree with reality -- that is the whole reason the runner reconciles against
-positions rather than against its own record -- so a status report that reads
+positions rather than against its own record -- so a status report built from
 the ledger could confirm a position that is not there.
 
 Commands, all read-only except one:
 
     /status       wallet, kill-switch distance, positions, last run
     /positions    open positions in detail
+    /chart        equity curve from the exchange's own income ledger
     /log          the tail of the runner log
     /stop CONFIRM disable the timer, so no further orders are placed
 
@@ -34,6 +35,7 @@ import os
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -47,14 +49,14 @@ STATE = RESULTS / "state.json"
 OFFSET = RESULTS / "bot_offset.json"
 LOG = Path("/var/log/quant4h/run.log")
 TIMER = "quant4h.timer"
+API = f"https://api.telegram.org/bot{TOKEN}"
 
 
 def api(method: str, **params) -> dict:
     import urllib.parse
     import urllib.request
-    data = urllib.parse.urlencode(params).encode()
     req = urllib.request.Request(
-        f"https://api.telegram.org/bot{TOKEN}/{method}", data=data)
+        f"{API}/{method}", data=urllib.parse.urlencode(params).encode())
     with urllib.request.urlopen(req, timeout=30) as r:
         return json.load(r)
 
@@ -64,6 +66,19 @@ def send(chat: str, text: str) -> None:
         api("sendMessage", chat_id=chat, text=text, parse_mode="HTML")
     except Exception as exc:  # noqa: BLE001
         print(f"send failed: {exc}", flush=True)
+
+
+def send_photo(chat: str, path: Path, caption: str) -> None:
+    import requests
+    with path.open("rb") as fh:
+        r = requests.post(f"{API}/sendPhoto",
+                          data={"chat_id": chat, "caption": caption,
+                                "parse_mode": "HTML"},
+                          files={"photo": ("chart.png", fh, "image/png")},
+                          timeout=60)
+    if not r.ok:
+        print(f"sendPhoto failed: {r.text}", flush=True)
+        send(chat, caption)
 
 
 def read_state() -> dict:
@@ -87,26 +102,22 @@ def timer_state() -> str:
     try:
         r = subprocess.run(["systemctl", "is-enabled", TIMER],
                            capture_output=True, text=True, timeout=10)
-        enabled = r.stdout.strip() == "enabled"
-    except Exception:  # noqa: BLE001
-        return "unknown"
-    if not enabled:
-        return "DISABLED — no further runs"
-    try:
-        r = subprocess.run(
-            ["systemctl", "show", TIMER, "-p", "NextElapseUSecRealtime",
-             "--value"], capture_output=True, text=True, timeout=10)
+        if r.stdout.strip() != "enabled":
+            return "DISABLED, no further runs"
+        r = subprocess.run(["systemctl", "show", TIMER, "--value",
+                            "-p", "NextElapseUSecRealtime"],
+                           capture_output=True, text=True, timeout=10)
         return f"enabled, next {r.stdout.strip() or 'unknown'}"
     except Exception:  # noqa: BLE001
-        return "enabled"
+        return "unknown"
 
 
 def exchange():
     """Import live_real only when the exchange is actually needed.
 
-    This runs once a minute. Importing pandas and the strategy package on every
-    poll would cost seconds of CPU each time to answer nothing, since most polls
-    find no messages at all."""
+    This polls once a minute. Importing pandas and the strategy package every
+    time would cost seconds of CPU to answer nothing, since most polls find no
+    messages at all."""
     key = os.environ.get("BINANCE_API_KEY", "").strip()
     sec = os.environ.get("BINANCE_API_SECRET", "").strip()
     if not key or not sec:
@@ -121,28 +132,25 @@ def cmd_status() -> str:
     out = ["<b>quant-4h-dual</b>"]
 
     if st.get("killed_at"):
-        out.append(f"\n⛔ <b>KILL SWITCH TRIPPED</b> {st['killed_at'][:19]}\n"
-                   f"No orders will be placed until it is cleared by hand.")
+        out.append(f"\n⛔ <b>KILL SWITCH TRIPPED</b> {str(st['killed_at'])[:19]}"
+                   f"\nNo orders until it is cleared by hand.")
 
     ex = exchange()
     if ex is None:
-        out.append("\ncredentials unavailable; reporting from the local record")
-        wallet = float(st.get("last_wallet") or 0)
-        pos = {}
-    else:
-        try:
-            wallet, pos = ex.wallet_usdt(), ex.positions()
-        except Exception as exc:  # noqa: BLE001
-            return f"could not reach Binance: {html.escape(str(exc))}"
+        return "credentials unavailable"
+    try:
+        wallet, pos = ex.wallet_usdt(), ex.positions()
+    except Exception as exc:  # noqa: BLE001
+        return f"could not reach Binance: {html.escape(str(exc))}"
 
     base = float(st.get("baseline_equity") or wallet or 0)
     floor = base * (1 - KILL)
-    pnl = (wallet / base - 1) if base > 0 else 0.0
-    room = (wallet / floor - 1) if floor > 0 else 0.0
-
-    out.append(f"\nwallet   <b>{wallet:,.2f}</b> USDT ({pnl:+.2%} vs start)")
+    out.append(f"\nwallet   <b>{wallet:,.2f}</b> USDT "
+               f"({wallet / base - 1:+.2%} vs start)" if base > 0 else
+               f"\nwallet   <b>{wallet:,.2f}</b> USDT")
     out.append(f"start    {base:,.2f}")
-    out.append(f"floor    {floor:,.2f}  ({room:+.1%} away)")
+    if floor > 0:
+        out.append(f"floor    {floor:,.2f}  ({wallet / floor - 1:+.1%} away)")
 
     if pos:
         out.append("\n<b>positions</b>")
@@ -153,10 +161,10 @@ def cmd_status() -> str:
 
     frac = run.get("target_fraction") or {}
     if frac:
-        want = ", ".join(f"{k} {v:.1%}" for k, v in frac.items())
-        out.append(f"\nlast target  {want}")
-    n = len(run.get("plan") or [])
-    out.append(f"last run     {run.get('bar', '?')}, {n} order(s)"
+        out.append("\nlast target  "
+                   + ", ".join(f"{k} {v:.1%}" for k, v in frac.items()))
+    out.append(f"last run     {run.get('bar', '?')}, "
+               f"{len(run.get('plan') or [])} order(s)"
                + ("  [dry]" if run.get("dry_run") else ""))
     out.append(f"schedule     {timer_state()}")
     return "\n".join(out)
@@ -178,11 +186,115 @@ def cmd_positions() -> str:
         out.append(
             f"\n{r['symbol']}  {float(r['positionAmt']):+.6f}"
             f"\n  entry {float(r.get('entryPrice') or 0):,.2f}"
-            f"  mark {float(r.get('markPrice') or 0):,.2f}"
+            f"   mark {float(r.get('markPrice') or 0):,.2f}"
             f"\n  notional {abs(float(r.get('notional') or 0)):,.2f} USD"
             f"\n  uPnL {float(r.get('unRealizedProfit') or 0):+,.2f} USD"
-            f"\n  liq {float(r.get('liquidationPrice') or 0):,.2f}")
+            f"\n  liquidation {float(r.get('liquidationPrice') or 0):,.2f}")
     return "\n".join(out)
+
+
+def income(ex, days: int = 120) -> list:
+    """Every ledger entry, paged. The exchange's own record of what happened."""
+    rows, start = [], int(time.time() * 1000) - days * 86_400_000
+    while True:
+        page = ex._signed("GET", "/fapi/v1/income",
+                          {"startTime": start, "limit": 1000})
+        rows += page
+        if len(page) < 1000:
+            break
+        start = int(page[-1]["time"]) + 1
+    rows.sort(key=lambda r: int(r["time"]))
+    return rows
+
+
+def cmd_chart():
+    """Equity from the exchange's income ledger.
+
+    Realised P&L, funding and commission all land there with timestamps, which
+    makes it the account's actual history rather than a reconstruction from
+    local files. TRANSFER entries are excluded: money moved in is not profit,
+    and counting it would draw a deposit as a rally."""
+    ex = exchange()
+    if ex is None:
+        return "credentials unavailable"
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.dates as mdates
+        import matplotlib.pyplot as plt
+    except ImportError:
+        return ("charting needs matplotlib:\n"
+                "<code>/opt/quant-4h-dual/.venv/bin/pip install matplotlib</code>")
+
+    try:
+        rows = income(ex)
+        wallet = ex.wallet_usdt()
+        upnl = sum(float(p.get("unRealizedProfit") or 0)
+                   for p in ex._signed("GET", "/fapi/v2/positionRisk"))
+    except Exception as exc:  # noqa: BLE001
+        return f"could not reach Binance: {html.escape(str(exc))}"
+
+    trade = [r for r in rows if r.get("incomeType") != "TRANSFER"]
+    if not trade:
+        return ("nothing realised yet, so there is no curve to draw.\n"
+                f"wallet {wallet:,.2f} USDT, unrealised {upnl:+,.2f}")
+
+    st = read_state()
+    base = float(st.get("baseline_equity") or wallet)
+    floor = base * (1 - KILL)
+
+    xs, ys, run = [], [], 0.0
+    for r in trade:
+        run += float(r["income"])
+        xs.append(datetime.fromtimestamp(int(r["time"]) / 1000, timezone.utc))
+        ys.append(base + run)
+    xs.append(datetime.now(timezone.utc))
+    ys.append(base + run + upnl)
+
+    tot = {}
+    for r in trade:
+        tot[r["incomeType"]] = tot.get(r["incomeType"], 0.0) + float(r["income"])
+
+    fig, ax = plt.subplots(figsize=(8, 4.2), dpi=150)
+    ax.plot(xs, ys, lw=2, color="#22aa77", zorder=3)
+    ax.fill_between(xs, base, ys, alpha=.12, color="#22aa77", zorder=2)
+    # Scale to the equity, not to the kill floor. The floor sits 35% below the
+    # start, so including it squeezes the curve into the top third of the frame
+    # and the shape -- the reason for drawing this at all -- becomes unreadable.
+    # When the floor is off-scale it is reported in the caption instead.
+    lo, hi = min(min(ys), base), max(max(ys), base)
+    pad = max((hi - lo) * .15, base * .01)
+    lo, hi = lo - pad, hi + pad
+    ax.axhline(base, color="#999", lw=1, ls="--", zorder=1)
+    ax.annotate(f"start {base:,.0f}", (xs[0], base), fontsize=8, color="#666",
+                textcoords="offset points", xytext=(3, 5))
+    if floor >= lo:
+        ax.axhline(floor, color="#cc3333", lw=1.2, ls="--", zorder=1)
+        ax.annotate(f"kill floor {floor:,.0f}", (xs[0], floor), fontsize=8,
+                    color="#cc3333", textcoords="offset points", xytext=(3, 5))
+    ax.set_ylim(lo, hi)
+    ax.set_ylabel("USDT")
+    ax.set_title(f"quant-4h-dual   {ys[-1]:,.2f} USDT  "
+                 f"({ys[-1] / base - 1:+.2%} since start)", fontsize=11)
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d"))
+    ax.grid(alpha=.25)
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+    fig.tight_layout()
+    out = RESULTS / "chart.png"
+    fig.savefig(out)
+    plt.close(fig)
+
+    caption = "\n".join([
+        f"<b>{ys[-1]:,.2f} USDT</b>  ({ys[-1] / base - 1:+.2%} since start)",
+        f"realised   {tot.get('REALIZED_PNL', 0):+,.2f}",
+        f"funding    {tot.get('FUNDING_FEE', 0):+,.2f}",
+        f"fees       {tot.get('COMMISSION', 0):+,.2f}",
+        f"unrealised {upnl:+,.2f}",
+        f"kill floor {floor:,.2f}  ({wallet / floor - 1:+.1%} away)"
+        if floor > 0 else "",
+    ])
+    return out, caption
 
 
 def cmd_log() -> str:
@@ -203,25 +315,28 @@ def cmd_stop(text: str) -> str:
                        capture_output=True, text=True, timeout=20, check=True)
     except Exception as exc:  # noqa: BLE001
         return (f"could not disable the timer: {html.escape(str(exc))}\n"
-                f"Run on the server: <code>systemctl disable --now {TIMER}</code>")
-    return (f"⏹ schedule disabled — {timer_state()}\n"
-            f"Open positions are untouched. Close them on Binance if you want out.")
+                f"On the server: <code>systemctl disable --now {TIMER}</code>")
+    return ("⏹ schedule disabled. Open positions are untouched — "
+            "close them on Binance if you want out.")
 
 
 HELP = ("<b>quant-4h-dual</b>\n"
         "/status — wallet, kill-switch distance, positions\n"
         "/positions — open positions in detail\n"
+        "/chart — equity curve since the account started\n"
         "/log — the tail of the runner log\n"
         "/stop CONFIRM — stop placing orders\n\n"
         "Any other message returns /status.")
 
 
-def handle(text: str) -> str:
+def handle(text: str):
     t = text.strip().lower()
     if t.startswith("/stop"):
         return cmd_stop(text)
-    if t.startswith("/positions") or t.startswith("/pos"):
+    if t.startswith("/pos"):
         return cmd_positions()
+    if t.startswith("/chart") or t.startswith("/graph"):
+        return cmd_chart()
     if t.startswith("/log"):
         return cmd_log()
     if t.startswith("/help") or t.startswith("/start"):
@@ -253,19 +368,23 @@ def main() -> None:
         if not text:
             continue
         # Only the configured chat. Anyone can find a bot and message it, and
-        # this one reports a real account.
+        # this one reports on a real account.
         if chat != CHAT:
             print(f"ignoring chat {chat}", flush=True)
             continue
         print(f"{chat}: {text!r}", flush=True)
         try:
-            send(chat, handle(text))
+            reply = handle(text)
+            if isinstance(reply, tuple):
+                send_photo(chat, reply[0], reply[1])
+            else:
+                send(chat, reply)
         except Exception as exc:  # noqa: BLE001
             send(chat, f"failed: {html.escape(str(exc))}")
 
-    OFFSET.write_text(json.dumps({"offset": offset,
-                                  "at": time.strftime("%Y-%m-%dT%H:%M:%SZ",
-                                                      time.gmtime())}))
+    OFFSET.write_text(json.dumps(
+        {"offset": offset,
+         "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}))
 
 
 if __name__ == "__main__":
