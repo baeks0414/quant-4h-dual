@@ -132,12 +132,41 @@ fi
 chown root:root "$ENV_FILE"; chmod 600 "$ENV_FILE"
 ok "written to $ENV_FILE (previous kept as $ENV_FILE.bak)"
 
+say "two-way bot"
+APP_DIR=${APP_DIR:-/opt/quant-4h-dual}
+SYSCTL=$(command -v systemctl)
+
+# The bot may disable the schedule and nothing else. That is a safe thing to
+# reach from a chat because it can only reduce activity -- it cannot open a
+# position, resize one, or move funds. The rule is written narrowly for exactly
+# that command, and validated before it is installed, since a malformed sudoers
+# file locks sudo for everyone.
+TMP=$(mktemp)
+printf 'quant ALL=(root) NOPASSWD: %s disable --now quant4h.timer
+' "$SYSCTL" > "$TMP"
+if visudo -c -q -f "$TMP" 2>/dev/null; then
+  install -m 440 -o root -g root "$TMP" /etc/sudoers.d/quant4h-bot
+  ok "the bot may stop the schedule, and nothing else"
+else
+  warn "could not install the sudoers rule; /stop will not work from Telegram"
+fi
+rm -f "$TMP"
+
+install -m 644 "$APP_DIR/deploy/quant4h-bot.service" /etc/systemd/system/
+install -m 644 "$APP_DIR/deploy/quant4h-bot.timer"   /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now quant4h-bot.timer >/dev/null 2>&1
+systemctl is-enabled --quiet quant4h-bot.timer   && ok "polling every minute" || bad "could not enable the bot timer"
+
 cat <<'NEXT'
 
-   The next scheduled run will notify. To see one now:
+   Message the bot and it will answer within a minute:
 
-     systemctl start quant4h.service
+     /status       wallet, distance to the kill switch, positions
+     /positions    open positions in detail
+     /log          the tail of the runner log
+     /stop CONFIRM stop placing orders (positions are NOT closed)
 
-   Note this sends a message every run -- six a day. If that is too much,
-   say so and the runner can be changed to alert only on orders and faults.
+   It also messages you on every run -- six a day. Say so if that is too much
+   and it can be narrowed to orders and faults only.
 NEXT

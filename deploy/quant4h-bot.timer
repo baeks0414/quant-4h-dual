@@ -1,0 +1,13 @@
+[Unit]
+Description=poll Telegram for status requests
+
+[Timer]
+# A poll that finds nothing costs about 0.2s, so a minute of latency on a reply
+# is cheaper than supervising a long-running process that can die unnoticed.
+OnBootSec=1min
+OnUnitActiveSec=1min
+AccuracySec=5s
+Persistent=false
+
+[Install]
+WantedBy=timers.target
