@@ -17,6 +17,7 @@ PY=${PY:-/opt/quant-4h-dual/.venv/bin/python}
 say() { printf '\n\033[1;33m== %s\033[0m\n' "$*"; }
 ok()  { printf '   \033[1;32mok\033[0m   %s\n' "$*"; }
 bad() { printf '   \033[1;31mFAIL\033[0m %s\n' "$*"; }
+warn(){ printf '   \033[1;33mwarn\033[0m %s\n' "$*"; }
 
 [ "$(id -u)" -eq 0 ] || { bad "run as root"; exit 1; }
 [ -f "$ENV_FILE" ] || { bad "$ENV_FILE missing"; exit 1; }
@@ -142,8 +143,9 @@ SYSCTL=$(command -v systemctl)
 # that command, and validated before it is installed, since a malformed sudoers
 # file locks sudo for everyone.
 TMP=$(mktemp)
-printf 'quant ALL=(root) NOPASSWD: %s disable --now quant4h.timer
-' "$SYSCTL" > "$TMP"
+cat > "$TMP" <<EOF
+quant ALL=(root) NOPASSWD: $SYSCTL disable --now quant4h.timer
+EOF
 if visudo -c -q -f "$TMP" 2>/dev/null; then
   install -m 440 -o root -g root "$TMP" /etc/sudoers.d/quant4h-bot
   ok "the bot may stop the schedule, and nothing else"
