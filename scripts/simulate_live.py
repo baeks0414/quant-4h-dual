@@ -57,7 +57,7 @@ def set_target(x):
 def run(wallet, positions, *, state=None, real_capital=700.0,
         max_order=None, max_gross=None, leverage=20.0, available=None,
         other_assets=None, include_collateral=False, coin_px=None,
-        hedge_mode=False, target=None, transfers=0.0):
+        hedge_mode=False, target=None, transfers=0.0, equity=None):
     """Run main() once against a fake account, returning (log, plan, state)."""
     L.STATE.unlink(missing_ok=True)
     if state is not None:
@@ -78,6 +78,8 @@ def run(wallet, positions, *, state=None, real_capital=700.0,
 
     set_target(PINNED if target is None else target)
     L.Futures.wallet_usdt = lambda self: float(wallet)
+    L.Futures.equity_usdt = lambda self: float(
+        wallet if equity is None else equity)
     L.Futures.available_usdt = lambda self: float(
         wallet if available is None else available)
     L.Futures.positions = lambda self: dict(positions)
@@ -275,6 +277,23 @@ def main() -> None:
     log, plan, st = run(700.0, {}, target=live_tgt)
     check("completes without error", "done" in log,
           f"live target {live_tgt:.4f}, {len(plan)} order(s)")
+
+    print("\n9m. reducing a position must not be charged new margin")
+    qty2 = round(2 * tgt * 700.0 / mid, 3)
+    log, plan, st = run(700.0, {"BTCUSDT": qty2}, leverage=1.0, available=1.0)
+    o = orders_of(plan)
+    check("the reduce is planned", len(o) == 1 and o[0]["side"] == "SELL")
+    check("no margin objection for a reduce", "would refuse" not in log)
+    check("labelled as reducing", "(reduces the position)" in log)
+
+    print("\n9n. an unrealized drawdown must reach the kill switch")
+    log, plan, st = run(700.0, {}, equity=400.0,
+                        state={"baseline_equity": 700.0, "last_wallet": 700.0,
+                               "last_run": "20260827T000000"})
+    check("kill measured on equity, not realized balance",
+          "KILL SWITCH would trip" in log)
+    check("the equity move was not misread as a transfer",
+          "the baseline stays" in log)
 
     print("\n10. wallet below the kill floor, with a baseline on record")
     log, plan, st = run(300.0, {}, state={"baseline_equity": 700.0})

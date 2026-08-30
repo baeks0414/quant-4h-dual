@@ -62,10 +62,23 @@ def api(method: str, **params) -> dict:
 
 
 def send(chat: str, text: str) -> None:
+    """Deliver, degrading before giving up.
+
+    Telegram rejects malformed HTML entities and messages over 4096 chars with
+    an HTTP 400, and a swallowed rejection here means the user's command was
+    consumed with no reply at all -- from the phone, indistinguishable from a
+    dead bot. Exchange error strings and log lines are not under our control,
+    so any of them can smuggle in a broken '<' or push a reply over the limit.
+    Fall back to plain text, truncated, before conceding."""
     try:
         api("sendMessage", chat_id=chat, text=text, parse_mode="HTML")
+        return
     except Exception as exc:  # noqa: BLE001
-        print(f"send failed: {exc}", flush=True)
+        print(f"HTML send failed ({exc}); retrying as plain text", flush=True)
+    try:
+        api("sendMessage", chat_id=chat, text=text[:3900])
+    except Exception as exc:  # noqa: BLE001
+        print(f"plain send failed too: {exc}", flush=True)
 
 
 def send_photo(chat: str, path: Path, caption: str) -> None:
@@ -197,9 +210,24 @@ def cmd_positions() -> str:
     return "\n".join(out)
 
 
-def income(ex, days: int = 120) -> list:
-    """Every ledger entry, paged. The exchange's own record of what happened."""
-    rows, start = [], int(time.time() * 1000) - days * 86_400_000
+def income(ex, since_ms: int | None = None) -> list:
+    """Every ledger entry, paged. The exchange's own record of what happened.
+
+    The window starts where live trading started (state.json's live_since),
+    because the chart anchors at the recorded baseline and adds this ledger
+    cumulatively: a fixed lookback would silently drop the account's earliest
+    entries once it outgrew the window, shifting the whole curve."""
+    if since_ms is None:
+        st = read_state()
+        stamp = st.get("live_since") or st.get("last_run")
+        if stamp:
+            from datetime import datetime
+            since_ms = int(datetime.strptime(
+                str(stamp), "%Y%m%dT%H%M%S").replace(
+                tzinfo=timezone.utc).timestamp() * 1000) - 3_600_000
+        else:
+            since_ms = int(time.time() * 1000) - 120 * 86_400_000
+    rows, start = [], int(since_ms)
     while True:
         page = ex._signed("GET", "/fapi/v1/income",
                           {"startTime": start, "limit": 1000})
@@ -306,7 +334,12 @@ def cmd_log() -> str:
         tail = LOG.read_text(encoding="utf-8", errors="replace").splitlines()[-14:]
     except Exception as exc:  # noqa: BLE001
         return f"cannot read the log: {html.escape(str(exc))}"
-    return "<pre>" + html.escape("\n".join(tail)) + "</pre>"
+    # Telegram caps a message at 4096 chars and rejects, not trims, past it.
+    # Fourteen replay lines fit comfortably, but one traceback does not.
+    body = "\n".join(tail)
+    if len(body) > 3600:
+        body = "...\n" + body[-3600:]
+    return "<pre>" + html.escape(body) + "</pre>"
 
 
 def cmd_stop(text: str) -> str:
@@ -320,8 +353,25 @@ def cmd_stop(text: str) -> str:
     except Exception as exc:  # noqa: BLE001
         return (f"could not disable the timer: {html.escape(str(exc))}\n"
                 f"On the server: <code>systemctl disable --now {TIMER}</code>")
+
+    # Disabling the timer stops FUTURE activations only. A run the timer
+    # already started keeps executing its plan to the end -- and saying
+    # "no further orders" while one is mid-flight would be a lie at the
+    # exact moment the user is trying to halt things. Killing it instead
+    # would be worse: a resting limit could be orphaned with no follow-up
+    # run left to reconcile it.
+    tail = ""
+    try:
+        r = subprocess.run(["systemctl", "is-active", "quant4h.service"],
+                           capture_output=True, text=True, timeout=10)
+        if r.stdout.strip() == "active":
+            tail = ("\n⚠ a run that started BEFORE this command is still "
+                    "finishing (a few minutes). It is the last one; it may "
+                    "still place the orders it already planned.")
+    except Exception:  # noqa: BLE001
+        pass
     return ("⏹ schedule disabled. Open positions are untouched — "
-            "close them on Binance if you want out.")
+            "close them on Binance if you want out." + tail)
 
 
 HELP = ("<b>quant-4h-dual</b>\n"
@@ -385,6 +435,12 @@ def main() -> None:
                 send(chat, reply)
         except Exception as exc:  # noqa: BLE001
             send(chat, f"failed: {html.escape(str(exc))}")
+        # Commit after every update, not once after the loop. The unit has a
+        # 120s timeout, and a kill mid-backlog with the offset unwritten would
+        # re-reply to everything already answered on the next poll.
+        OFFSET.write_text(json.dumps(
+            {"offset": offset,
+             "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}))
 
     OFFSET.write_text(json.dumps(
         {"offset": offset,

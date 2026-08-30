@@ -36,8 +36,11 @@ ok "python3-venv python3-pip git curl"
 
 say "code"
 if [ -d "$APP_DIR/.git" ]; then
-  sudo -u quant git -C "$APP_DIR" pull -q --ff-only || true
-  ok "repo updated"
+  if sudo -u quant git -C "$APP_DIR" pull -q --ff-only; then
+    ok "repo updated"
+  else
+    bad "git pull failed -- the checkout is still on the OLD code"
+  fi
 else
   sudo -u quant git clone -q "$REPO" "$APP_DIR"
   ok "repo cloned"

@@ -66,8 +66,39 @@ os.environ["QUANT_BT_USE_MEM_CACHE"] = "0"
 os.environ["QUANT_BT_PROGRESS_EVERY"] = "0"
 os.environ["QUANT_BT_SAVE_ARTIFACTS"] = "0"
 
-import pandas as pd
-import requests
+def _panic(stage: str, exc: BaseException) -> None:
+    """Last-resort alert for failures before main()'s own handler exists.
+
+    A crash here -- a broken venv, a dependency missing after a bad update --
+    used to die with a traceback in a log nobody watches while the timer kept
+    firing a runner that could not even import, silently flat for as long as
+    nobody looked. Only the stdlib is used, because the whole point of this
+    function is to still work when imports are broken."""
+    tok = os.environ.get("TELEGRAM_TOKEN", "").strip()
+    chat = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+    if not tok or not chat:
+        return
+    try:
+        import urllib.parse
+        import urllib.request
+        body = urllib.parse.urlencode({
+            "chat_id": chat,
+            "text": (f"live_real CANNOT START ({stage}): "
+                     f"{type(exc).__name__}: {exc}")[:3900],
+        }).encode()
+        urllib.request.urlopen(urllib.request.Request(
+            f"https://api.telegram.org/bot{tok}/sendMessage", data=body),
+            timeout=15)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+try:
+    import pandas as pd
+    import requests
+except Exception as _exc:  # noqa: BLE001
+    _panic("third-party imports", _exc)
+    raise
 
 DRY_RUN = os.environ.get("DRY_RUN", "1") != "0"
 KILL_DRAWDOWN = float(os.environ.get("KILL_DRAWDOWN", "0.35"))
@@ -131,18 +162,23 @@ def notify(text: str) -> None:
 # orchestration loop is duplicated. scripts/verify_target.py checks that this
 # reproduces the paper runner's reported positions.
 
-from quant.config.presets import (                                # noqa: E402
-    preset_dynamic_bear_state_trend, preset_balanced_alpha_sleeve_aggressive)
-from quant.core.engine import Engine                              # noqa: E402
-from quant.core.market import update_market_regime_gate           # noqa: E402
-from quant.core.portfolio import Portfolio                        # noqa: E402
-from quant.core.risk import RiskManager                           # noqa: E402
-from quant.core.risk_vol import VolScaledRiskManager              # noqa: E402
-from quant.data.features import add_features, to_feature_rows     # noqa: E402
-from quant.execution.paper_broker import PaperBroker              # noqa: E402
-from quant.strategies.wrappers import (                           # noqa: E402
-    MarketRegimeGate, MarketRegimeGateConfig)
-from quant.strategies.your_strategy import YourStrategy           # noqa: E402
+try:
+    from quant.config.presets import (                            # noqa: E402
+        preset_dynamic_bear_state_trend,
+        preset_balanced_alpha_sleeve_aggressive)
+    from quant.core.engine import Engine                          # noqa: E402
+    from quant.core.market import update_market_regime_gate       # noqa: E402
+    from quant.core.portfolio import Portfolio                    # noqa: E402
+    from quant.core.risk import RiskManager                       # noqa: E402
+    from quant.core.risk_vol import VolScaledRiskManager          # noqa: E402
+    from quant.data.features import add_features, to_feature_rows  # noqa: E402
+    from quant.execution.paper_broker import PaperBroker          # noqa: E402
+    from quant.strategies.wrappers import (                       # noqa: E402
+        MarketRegimeGate, MarketRegimeGateConfig)
+    from quant.strategies.your_strategy import YourStrategy       # noqa: E402
+except Exception as _exc:  # noqa: BLE001
+    _panic("strategy package imports", _exc)
+    raise
 
 INITIAL_EQUITY = 10_000.0
 TREND_WEIGHT, SLEEVE_WEIGHT = 0.70, 0.30
@@ -345,6 +381,16 @@ class Futures:
 
     def available_usdt(self) -> float:
         return self._asset_usdt("availableBalance")
+
+    def equity_usdt(self) -> float:
+        """marginBalance: wallet plus unrealized P&L.
+
+        walletBalance only moves when P&L is REALIZED, so a drawdown on a held
+        position is invisible to it until the position closes -- and a kill
+        switch reading it would sleep through the exact crash it exists for,
+        then wake to one giant realized lump. marginBalance is what the account
+        is actually worth right now."""
+        return self._asset_usdt("marginBalance")
 
     def wallet_usdt(self) -> float:
         return self._asset_usdt("walletBalance")
@@ -575,7 +621,12 @@ def main() -> None:
     # strategy asked. That is what the backtest describes -- it is a statement
     # about total exposure, not about how the exposure was assembled.
     INCLUDE = os.environ.get("INCLUDE_COLLATERAL", "0") == "1"
-    wallet = ex.total_usd() if INCLUDE else usdt
+    # Everything downstream -- sizing, the clamp, and above all the kill
+    # switch -- measures against marginBalance, not walletBalance. The two
+    # differ by exactly the unrealized P&L of open positions, and a kill
+    # switch on walletBalance sleeps through a drawdown until the position
+    # closes and delivers the whole loss as one realized lump.
+    wallet = ex.total_usd() if INCLUDE else ex.equity_usdt()
     if INCLUDE:
         log(f"INCLUDE_COLLATERAL on: capital is the whole wallet "
             f"{wallet:.2f} USD, not the {usdt:.2f} USDT alone")
@@ -706,6 +757,27 @@ def main() -> None:
     log(f"decision bar {bar}   target "
         f"{ {k: round(v, 4) for k, v in frac.items()} or 'flat'}")
 
+    # A resting order left by an earlier run would fill on top of the position
+    # this plan is about to be computed from, which is exactly the assumption
+    # reconciliation depends on. So the slate is cleared BEFORE the position
+    # snapshot is taken, not after: sweeping later leaves a window where a
+    # leftover order fills between the read and the sweep and the whole plan
+    # is built against a position that no longer exists.
+    if not DRY_RUN:
+        try:
+            # Only the symbols this strategy trades. cancel_all on everything
+            # would also sweep away orders a human placed on some other market
+            # in the same account, which are not ours to touch.
+            ours = {k.split(":", 1)[1] for k in detail}
+            stale = {o["symbol"] for o in ex.open_orders()} & ours
+            for sym in sorted(stale):
+                ex.cancel_all(sym)
+                log(f"  cleared resting order(s) on {sym}")
+        except Exception as exc:  # noqa: BLE001
+            log(f"  ABORTING: could not verify open orders are clear: {exc}")
+            notify("aborted: could not clear resting orders -- " + str(exc))
+            return
+
     rules = ex.rules()
     actual = ex.positions()
 
@@ -795,10 +867,19 @@ def main() -> None:
         for p in plan:
             info = risk.get(p["symbol"], {})
             lev = info.get("leverage") or 1.0
-            m = p["notional"] / lev
+            # Only the exposure the order ADDS needs new margin. An order that
+            # reduces or closes a position frees margin instead of consuming
+            # it, and charging it the full notional would refuse exactly the
+            # plans that de-risk -- the ones that must never be blocked. A
+            # flip's freed and re-posted margin roughly cancel, so the growth
+            # in |position| is the honest bill either way.
+            px = p["notional"] / float(p["qty"])
+            growth = max(0.0, abs(p["want"]) - abs(p["have"])) * px
+            m = growth / lev
             need += m
             log(f"  {p['symbol']}: {lev:g}x {info.get('margin', '?')}, "
-                f"margin {m:.2f} USD")
+                f"new margin {m:.2f} USD"
+                + ("" if growth else " (reduces the position)"))
         log(f"margin required {need:.2f} USDT, available {avail:.2f}")
         if need > avail:
             margin_short = (f"the plan needs {need:.2f} USDT of margin, "
@@ -814,23 +895,6 @@ def main() -> None:
             f"symbol(s) above, add margin, or reduce size.")
         notify("not trading, insufficient margin -- " + margin_short)
     else:
-        # A resting order left by an earlier run would fill on top of the
-        # position this plan was computed from, which is exactly the assumption
-        # reconciliation depends on. Clear the slate before sending anything.
-        try:
-            # Only the symbols this strategy trades. cancel_all on everything
-            # would also sweep away orders a human placed on some other market
-            # in the same account, which are not ours to touch.
-            ours = {k.split(":", 1)[1] for k in detail}
-            stale = {o["symbol"] for o in ex.open_orders()} & ours
-            for sym in sorted(stale):
-                ex.cancel_all(sym)
-                log(f"  cleared resting order(s) on {sym}")
-        except Exception as exc:  # noqa: BLE001
-            log(f"  ABORTING: could not verify open orders are clear: {exc}")
-            notify("aborted: could not clear resting orders -- " + str(exc))
-            return
-
         for p in plan:
             try:
                 res = execute(ex, p["symbol"], p["side"], p["qty"], p["rules"])
@@ -859,7 +923,11 @@ def main() -> None:
         log(f"state.json left untouched (dry run); plan saved as run_{stamp}.json")
     else:
         st.update({"baseline_equity": baseline, "last_bar": str(bar),
-                   "last_wallet": wallet, "last_run": stamp})
+                   "last_wallet": wallet, "last_run": stamp,
+                   # recorded once: tools that window exchange history (the
+                   # bot's equity chart) need to know when live trading began,
+                   # or an aging account silently loses its earliest entries
+                   "live_since": st.get("live_since") or stamp})
         STATE.write_text(json.dumps(st, indent=2), encoding="utf-8")
 
     dd = wallet / baseline - 1.0 if baseline > 0 else 0.0

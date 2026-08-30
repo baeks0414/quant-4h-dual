@@ -88,7 +88,15 @@ grep -q '^DRY_RUN=0' "$ENV_FILE" || { bad "DRY_RUN was not changed"; exit 1; }
 ok "DRY_RUN=0"
 
 say "first live run"
-systemctl start quant4h.service
+# Type=oneshot blocks until the run finishes and propagates its exit code --
+# discarding it here would let verification pass on a stale state.json from an
+# earlier attempt while the run itself had died.
+if ! systemctl start quant4h.service; then
+  cp -p "$ENV_FILE.bak" "$ENV_FILE"
+  bad "the first live run FAILED -- see /var/log/quant4h/run.log"
+  echo "   DRY_RUN restored to 1; the timer was NOT enabled."
+  exit 1
+fi
 tail -n 20 /var/log/quant4h/run.log | sed 's/^/   /'
 
 say "verifying what it recorded"
