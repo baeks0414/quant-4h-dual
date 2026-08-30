@@ -57,7 +57,7 @@ def set_target(x):
 def run(wallet, positions, *, state=None, real_capital=700.0,
         max_order=None, max_gross=None, leverage=20.0, available=None,
         other_assets=None, include_collateral=False, coin_px=None,
-        hedge_mode=False, target=None):
+        hedge_mode=False, target=None, transfers=0.0):
     """Run main() once against a fake account, returning (log, plan, state)."""
     L.STATE.unlink(missing_ok=True)
     if state is not None:
@@ -82,6 +82,7 @@ def run(wallet, positions, *, state=None, real_capital=700.0,
         wallet if available is None else available)
     L.Futures.positions = lambda self: dict(positions)
     L.Futures.other_assets = lambda self: dict(other_assets or {})
+    L.Futures.transfers_since = lambda self, ms: float(transfers)
     L.Futures._signed = lambda self, m, path, params=None: (
         {"dualSidePosition": bool(hedge_mode)}
         if "positionSide" in path else {})
@@ -236,18 +237,28 @@ def main() -> None:
     check("refuses outright", "Hedge mode" in log)
     check("nothing planned", len(plan) == 0)
 
-    print("\n9g. a deposit must move the kill-switch baseline with it")
-    log, plan, st = run(700.0, {},
-                        state={"baseline_equity": 160.0, "last_wallet": 160.0})
-    check("transfer recognised", "treating it as a transfer" in log)
+    print("\n9g. a deposit moves the baseline only when the ledger confirms it")
+    log, plan, st = run(700.0, {}, transfers=540.0,
+                        state={"baseline_equity": 160.0, "last_wallet": 160.0,
+                               "last_run": "20260827T000000"})
+    check("ledger transfer recognised", "ledger shows +540.00" in log)
     check("baseline follows the deposit", "baseline=700.00" in log)
     check("floor recomputed off the new baseline", "floor=455.00" in log)
 
     print("\n9h. ordinary P&L must NOT move the baseline")
-    log, plan, st = run(690.0, {},
-                        state={"baseline_equity": 700.0, "last_wallet": 700.0})
-    check("left alone", "treating it as a transfer" not in log)
+    log, plan, st = run(690.0, {}, transfers=0.0,
+                        state={"baseline_equity": 700.0, "last_wallet": 700.0,
+                               "last_run": "20260827T000000"})
+    check("left alone", "ledger shows" not in log)
     check("baseline unchanged", "baseline=700.00" in log)
+
+    print("\n9h2. a crash bar is NOT a withdrawal -- the floor must hold")
+    log, plan, st = run(500.0, {}, transfers=0.0,
+                        state={"baseline_equity": 700.0, "last_wallet": 700.0,
+                               "last_run": "20260827T000000"})
+    check("recognised as P&L, not a transfer", "the baseline stays" in log)
+    check("baseline still 700", "baseline=700.00" in log)
+    check("floor still 455", "floor=455.00" in log)
 
     print("\n9i. a target too small for one lot is explained, not silent")
     log, plan, st = run(160.0, {}, target=0.17)

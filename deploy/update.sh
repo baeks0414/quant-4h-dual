@@ -31,6 +31,9 @@ BEFORE=$(q_git rev-parse --short HEAD)
 q_git pull -q --ff-only || { bad "git pull failed"; exit 1; }
 AFTER=$(q_git rev-parse --short HEAD)
 [ "$BEFORE" = "$AFTER" ] && ok "already at $AFTER" || ok "$BEFORE -> $AFTER"
+# code is installed -e so pulls take effect directly, but new entries in
+# pyproject's dependencies only land through pip
+sudo -u quant "$APP_DIR/.venv/bin/pip" install -q -e "$APP_DIR"   && ok "dependencies current" || bad "pip install failed"
 
 say "settings"
 # A fixed order cap below the capital refuses every entry, silently, forever.
@@ -56,6 +59,13 @@ say "systemd units"
 # git pull updates the copies under deploy/, not the ones systemd reads
 install -m 644 "$APP_DIR/deploy/quant4h.service" /etc/systemd/system/
 install -m 644 "$APP_DIR/deploy/quant4h.timer"   /etc/systemd/system/
+# the bot has its own units; a pull that changes them must reach systemd too,
+# or the server keeps running the version from whenever telegram.sh last ran
+if [ -f /etc/systemd/system/quant4h-bot.service ]; then
+  install -m 644 "$APP_DIR/deploy/quant4h-bot.service" /etc/systemd/system/
+  install -m 644 "$APP_DIR/deploy/quant4h-bot.timer"   /etc/systemd/system/
+  ok "bot units refreshed as well"
+fi
 systemctl daemon-reload
 ok "reinstalled and reloaded"
 

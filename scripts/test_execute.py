@@ -42,7 +42,8 @@ class Stub:
 
     def __init__(self, *, fill_after=None, fill_qty=0.0, final_status="NEW",
                  reject_post_only=False, status_raises=False,
-                 cancel_raises=False, cancel_reports=None):
+                 cancel_raises=False, cancel_reports=None,
+                 place_transport_fail=False, lookup="works"):
         self.fill_after = fill_after      # polls before the order goes terminal
         self.fill_qty = fill_qty          # quantity filled by then
         self.final_status = final_status
@@ -50,6 +51,8 @@ class Stub:
         self.status_raises = status_raises
         self.cancel_raises = cancel_raises
         self.cancel_reports = cancel_reports
+        self.place_transport_fail = place_transport_fail
+        self.lookup = lookup            # "works" | "missing" | "fail"
         self.polls = 0
         self.market_orders = []
         self.limit_orders = []
@@ -58,10 +61,22 @@ class Stub:
     def book(self, sym):
         return MID - 0.5, MID + 0.5
 
-    def limit_maker(self, sym, side, qty, price):
+    def limit_maker(self, sym, side, qty, price, cid):
         if self.reject_post_only:
-            raise RuntimeError("-2021 Order would immediately trigger")
+            # a real rejection is an HTTP answer, so it leads with the code
+            raise RuntimeError('400 {"code":-5022,"msg":"Post Only rejected"}')
+        if self.place_transport_fail:
+            # the order DID reach the book; only the response was lost
+            self.limit_orders.append((sym, side, qty, price))
+            raise RuntimeError("HTTPSConnectionPool: read timed out")
         self.limit_orders.append((sym, side, qty, price))
+        return {"orderId": 1, "status": "NEW", "executedQty": "0"}
+
+    def order_by_cid(self, sym, cid):
+        if self.lookup == "missing":
+            raise RuntimeError('400 {"code":-2013,"msg":"Order does not exist."}')
+        if self.lookup == "fail":
+            raise RuntimeError("HTTPSConnectionPool: read timed out")
         return {"orderId": 1, "status": "NEW", "executedQty": "0"}
 
     def order(self, sym, oid):
@@ -156,6 +171,25 @@ def main() -> None:
              want, ex, expect_market=False)
     check("refused to guess", not ex.market_orders,
           "an unknown fill must not be topped up at market")
+
+    # The lost-response family: the placement request may or may not have
+    # reached the book, and only the client order id can say which.
+    ex = Stub(place_transport_fail=True, lookup="works", fill_after=1,
+              fill_qty=0.007, final_status="FILLED")
+    scenario("8. response lost, order WAS resting and fills -- no market top-up",
+             want, ex, expect_market=False)
+    check("the resting order was found by client id, not re-sent",
+          len(ex.limit_orders) == 1)
+
+    ex = Stub(place_transport_fail=True, lookup="missing")
+    scenario("9. response lost, exchange confirms no order -- market is safe",
+             want, ex, expect_market=True)
+
+    ex = Stub(place_transport_fail=True, lookup="fail")
+    scenario("10. response lost and the lookup fails too -- send nothing",
+             want, ex, expect_market=False)
+    check("refused to guess", not ex.market_orders,
+          "a possibly-resting order must not be doubled at market")
 
     bad = [n for n, ok in CHECKS if not ok]
     print(f"\n{'=' * 62}\n{len(CHECKS) - len(bad)}/{len(CHECKS)} checks passed")

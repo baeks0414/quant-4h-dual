@@ -375,13 +375,32 @@ class Futures:
         d = self.public("/fapi/v1/ticker/bookTicker", {"symbol": sym})
         return float(d["bidPrice"]), float(d["askPrice"])
 
-    def limit_maker(self, sym, side, qty, price):
+    def limit_maker(self, sym, side, qty, price, cid):
         """GTX = post-only. Rejected outright if it would cross, so the maker
-        fee is guaranteed."""
+        fee is guaranteed. The caller supplies the client order id: when the
+        response is lost in transit, that id is the only handle left for
+        finding out whether the order exists."""
         return self._signed("POST", "/fapi/v1/order", {
             "symbol": sym, "side": side, "type": "LIMIT", "quantity": qty,
-            "price": price, "timeInForce": "GTX",
-            "newClientOrderId": _cid(sym, side, "L")})
+            "price": price, "timeInForce": "GTX", "newClientOrderId": cid})
+
+    def transfers_since(self, ms: int) -> float:
+        """Net USDT moved in or out since `ms`, from the income ledger."""
+        total, start = 0.0, int(ms)
+        while True:
+            page = self._signed("GET", "/fapi/v1/income",
+                                {"incomeType": "TRANSFER", "startTime": start,
+                                 "limit": 1000})
+            for row in page:
+                total += float(row.get("income") or 0)
+            if len(page) < 1000:
+                break
+            start = int(page[-1]["time"]) + 1
+        return total
+
+    def order_by_cid(self, sym, cid):
+        return self._signed("GET", "/fapi/v1/order",
+                            {"symbol": sym, "origClientOrderId": cid})
 
     def market(self, sym, side, qty):
         return self._signed("POST", "/fapi/v1/order", {
@@ -441,11 +460,39 @@ def execute(ex: Futures, sym: str, side: str, qty: Decimal, r: dict) -> dict:
     bid, ask = ex.book(sym)
     px = p_round(bid if side == "BUY" else ask, r["tick"], up=(side != "BUY"))
 
+    cid = _cid(sym, side, "L")
     try:
-        o = ex.limit_maker(sym, side, qs, fmt(px))
+        o = ex.limit_maker(sym, side, qs, fmt(px), cid)
     except Exception as exc:  # noqa: BLE001
-        log(f"    post-only rejected ({exc}); taking at market")
-        return {"mode": "market", "resp": ex.market(sym, side, qs)}
+        # Two different failures share this branch and must not share a
+        # response. An HTTP error is the exchange ANSWERING that the order was
+        # not accepted (a GTX that would cross comes back exactly this way), so
+        # the market fallback is safe. A transport failure -- timeout,
+        # connection reset -- says nothing: the order may be resting on the
+        # book. Sending the full size at market on top of a resting limit is a
+        # double position bought with real money, so the unknown case is
+        # resolved by looking the order up by our own client id, and if even
+        # that fails, nothing more is sent; the next run reconciles from the
+        # actual position.
+        answered = str(exc).strip()[:3].isdigit()
+        if answered:
+            log(f"    post-only rejected ({exc}); taking at market")
+            return {"mode": "market", "resp": ex.market(sym, side, qs)}
+        log(f"    placement response lost ({exc}); checking by client id {cid}")
+        try:
+            o = ex.order_by_cid(sym, cid)
+            log(f"    order did reach the exchange (status {o.get('status')})")
+        except Exception as exc2:  # noqa: BLE001
+            if "-2013" in str(exc2):
+                log("    exchange confirms the order does not exist; "
+                    "taking at market")
+                return {"mode": "market", "resp": ex.market(sym, side, qs)}
+            log(f"    FILL UNKNOWN -- cannot confirm the order either way "
+                f"({exc2}). Sending nothing further; the next run reconciles "
+                f"from the real position.")
+            notify(f"{sym} {side}: placement state unknown, nothing further "
+                   f"sent. Check for a resting order.")
+            return {"mode": "unknown", "maker_qty": None, "status": "UNKNOWN"}
 
     oid = o.get("orderId")
     log(f"    limit {side} {qs} @ {fmt(px)} (id {oid}), resting up to {LIMIT_WAIT_SEC}s")
@@ -561,15 +608,34 @@ def main() -> None:
     #
     # A move this large is not one bar of P&L from a book that is roughly 1x, so
     # it is read as a transfer and the baseline follows it.
+    # A deposit is not a profit and a withdrawal is not a loss, yet both move
+    # the wallet, so transfers have to move the baseline with them. The first
+    # version inferred a transfer from the SIZE of the move (>20% in a bar),
+    # but a crash can move the wallet that much too, and misreading a crash as
+    # a withdrawal would re-anchor the baseline lower -- quietly weakening the
+    # kill switch at the exact moment it matters. The exchange keeps the real
+    # answer: every transfer is a TRANSFER row in the income ledger, so only
+    # what the ledger confirms moves the baseline.
     last_wallet = float(st.get("last_wallet") or 0)
-    if last_wallet > 0:
+    if last_wallet > 0 and st.get("last_run"):
         moved = wallet - last_wallet
-        if abs(moved) > max(last_wallet * 0.20, 1.0):
-            baseline += moved
-            log(f"wallet moved {moved:+.2f} since the last run "
-                f"({last_wallet:.2f} -> {wallet:.2f}), too much for one bar of "
-                f"P&L; treating it as a transfer and moving the kill-switch "
-                f"baseline to {baseline:.2f}")
+        big = abs(moved) > max(last_wallet * 0.20, 1.0)
+        try:
+            since = int(pd.Timestamp(st["last_run"]).timestamp() * 1000) - 60_000
+            xfer = ex.transfers_since(since)
+        except Exception as exc:  # noqa: BLE001
+            xfer = 0.0
+            if big:
+                log(f"WARNING: wallet moved {moved:+.2f} but the transfer "
+                    f"ledger is unreadable ({exc}); baseline stays "
+                    f"{baseline:.2f} until it can be read")
+        if abs(xfer) > 0.5:
+            baseline += xfer
+            log(f"ledger shows {xfer:+.2f} USDT transferred since the last "
+                f"run; the kill-switch baseline moves with it to {baseline:.2f}")
+        elif big:
+            log(f"wallet moved {moved:+.2f} with no transfer on the ledger -- "
+                f"that is P&L, the baseline stays at {baseline:.2f}")
     capital = float(os.environ.get("REAL_CAPITAL", wallet))
     floor_equity = baseline * (1.0 - KILL_DRAWDOWN)
 
@@ -656,7 +722,7 @@ def main() -> None:
                 actual[sym] = actual.get(sym, 0.0) + qty
                 log(f"  counting {qty:g} {sym[:-4]} of collateral as an open "
                     f"{sym} position")
-    plan, gross = [], 0.0
+    plan, gross, skipped = [], 0.0, []
 
     for sym in sorted(set(frac) | set(actual)):
         r = rules.get(sym)
@@ -686,12 +752,17 @@ def main() -> None:
                     f"of a {step_usd:.2f} USD lot, and rounding up to one would "
                     f"inflate it by {up_usd / want_usd - 1:.0%}, past the "
                     f"{MAX_ROUND_UP:.0%} cap -- skipping")
+                skipped.append(f"{sym} ${want_usd:.0f} is only "
+                               f"{want_usd / step_usd:.2f} of a ${step_usd:.0f} lot")
             continue
         if q < r["minq"]:
             log(f"  {sym}: delta {delta:+.6f} below minQty {r['minq']}, skipping")
+            skipped.append(f"{sym} below the exchange minimum quantity")
             continue
         if notional < float(r.get("minn", 0)):
             log(f"  {sym}: {notional:.2f} below minNotional {r.get('minn')}, skipping")
+            skipped.append(f"{sym} ${notional:.0f} below the "
+                           f"${float(r.get('minn', 0)):.0f} order minimum")
             continue
         if notional > max_order:
             log(f"  {sym}: REFUSED, {notional:.2f} over the order cap {max_order:.2f}")
@@ -747,7 +818,11 @@ def main() -> None:
         # position this plan was computed from, which is exactly the assumption
         # reconciliation depends on. Clear the slate before sending anything.
         try:
-            stale = {o["symbol"] for o in ex.open_orders()}
+            # Only the symbols this strategy trades. cancel_all on everything
+            # would also sweep away orders a human placed on some other market
+            # in the same account, which are not ours to touch.
+            ours = {k.split(":", 1)[1] for k in detail}
+            stale = {o["symbol"] for o in ex.open_orders()} & ours
             for sym in sorted(stale):
                 ex.cancel_all(sym)
                 log(f"  cleared resting order(s) on {sym}")
@@ -788,9 +863,20 @@ def main() -> None:
         STATE.write_text(json.dumps(st, indent=2), encoding="utf-8")
 
     dd = wallet / baseline - 1.0 if baseline > 0 else 0.0
+    # The six-a-day message must answer the question a phone-watcher actually
+    # has: not just how many orders, but what the strategy wanted and, when
+    # nothing went out, why not. "orders 0" with no reason reads as a broken
+    # system and sends its owner digging through Binance for trades that were
+    # never supposed to exist.
+    tgt_txt = ", ".join(f"{k} {v:.0%}" for k, v in frac.items()) or "flat"
+    why = ""
+    if skipped and not plan:
+        why = "\nno order: " + "; ".join(skipped[:3])
     notify(f"<b>DUAL 4H {'DRY' if DRY_RUN else 'LIVE'}</b>\n{bar}\n"
            f"wallet ${wallet:,.2f} ({dd:+.1%} vs baseline)\n"
-           f"orders {len(plan)}" + (f" | sent {len(sent)}" if not DRY_RUN else ""))
+           f"target {tgt_txt}\n"
+           f"orders {len(plan)}"
+           + (f" | sent {len(sent)}" if not DRY_RUN else "") + why)
     log("done")
 
 

@@ -122,7 +122,11 @@ def exchange():
     sec = os.environ.get("BINANCE_API_SECRET", "").strip()
     if not key or not sec:
         return None
-    os.environ.setdefault("DRY_RUN", "1")   # importing must not arm anything
+    # Forced, not defaulted: /etc/quant4h.env now carries DRY_RUN=0 and is
+    # this service's EnvironmentFile, so setdefault would leave the import
+    # armed. The bot never calls L.main(), but the module a reporting tool
+    # loads should not be one environment variable away from trading.
+    os.environ["DRY_RUN"] = "1"
     import live_real as L
     return L.Futures(key, sec)
 
