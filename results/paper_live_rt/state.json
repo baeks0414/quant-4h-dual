@@ -1,6 +1,6 @@
 {
-  "final_equity": 13045.91,
-  "last_bar_time": "2026-09-12 12:00:00+00:00",
+  "final_equity": 13078.8,
+  "last_bar_time": "2026-09-12 16:00:00+00:00",
   "live_elapsed": "51d 20h",
   "live_start": "2026-03-08 16:00:00+00:00",
   "market_regime": "CHOP",
@@ -9,7 +9,7 @@
     "BTCUSDT": "FLAT",
     "ETHUSDT": "LONG"
   },
-  "total_return": 0.304591,
+  "total_return": 0.30788,
   "trend_positions": {
     "BTCUSDT": "FLAT",
     "ETHUSDT": "FLAT"
