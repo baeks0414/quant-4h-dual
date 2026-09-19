@@ -57,7 +57,8 @@ def set_target(x):
 def run(wallet, positions, *, state=None, real_capital=700.0,
         max_order=None, max_gross=None, leverage=20.0, available=None,
         other_assets=None, include_collateral=False, coin_px=None,
-        hedge_mode=False, target=None, transfers=0.0, equity=None):
+        hedge_mode=False, target=None, transfers=0.0, equity=None,
+        transfer_id=901):
     """Run main() once against a fake account, returning (log, plan, state)."""
     L.STATE.unlink(missing_ok=True)
     if state is not None:
@@ -84,7 +85,9 @@ def run(wallet, positions, *, state=None, real_capital=700.0,
         wallet if available is None else available)
     L.Futures.positions = lambda self: dict(positions)
     L.Futures.other_assets = lambda self: dict(other_assets or {})
-    L.Futures.transfers_since = lambda self, ms: float(transfers)
+    L.Futures.transfers_since = lambda self, ms: (
+        [{"tranId": transfer_id, "income": str(transfers), "time": 1}]
+        if transfers else [])
     L.Futures._signed = lambda self, m, path, params=None: (
         {"dualSidePosition": bool(hedge_mode)}
         if "positionSide" in path else {})
@@ -246,6 +249,23 @@ def main() -> None:
     check("ledger transfer recognised", "ledger shows +540.00" in log)
     check("baseline follows the deposit", "baseline=700.00" in log)
     check("floor recomputed off the new baseline", "floor=455.00" in log)
+
+    print("\n9g2. the same transfer, seen again, moves the baseline only once")
+    log, plan, st = run(700.0, {}, transfers=540.0, transfer_id=901,
+                        state={"baseline_equity": 700.0, "last_wallet": 700.0,
+                               "last_run": "20260827T000000",
+                               "seen_transfers": ["901"]})
+    check("known tranId ignored", "ledger shows" not in log)
+    check("baseline not double-counted", "baseline=700.00" in log)
+
+    print("\n9g3. an ETH residual under minNotional is closed reduce-only")
+    log, plan, st = run(700.0, {"ETHUSDT": 0.006})
+    o = orders_of(plan, "ETHUSDT")
+    check("the dust close is planned, not skipped",
+          len(o) == 1 and o[0]["side"] == "SELL",
+          f"{o[0]['notional']:.2f} USD" if o else "skipped")
+    check("marked reduce-only", o and o[0].get("reduce") is True)
+    check("not silenced as below-minimum", "below minNotional" not in log)
 
     print("\n9h. ordinary P&L must NOT move the baseline")
     log, plan, st = run(690.0, {}, transfers=0.0,

@@ -43,7 +43,8 @@ class Stub:
     def __init__(self, *, fill_after=None, fill_qty=0.0, final_status="NEW",
                  reject_post_only=False, status_raises=False,
                  cancel_raises=False, cancel_reports=None,
-                 place_transport_fail=False, lookup="works"):
+                 place_transport_fail=False, lookup="works",
+                 place_raises=None):
         self.fill_after = fill_after      # polls before the order goes terminal
         self.fill_qty = fill_qty          # quantity filled by then
         self.final_status = final_status
@@ -53,6 +54,8 @@ class Stub:
         self.cancel_reports = cancel_reports
         self.place_transport_fail = place_transport_fail
         self.lookup = lookup            # "works" | "missing" | "fail"
+        self.place_raises = place_raises  # raise this message on placement
+        self.reduce_flags = []
         self.polls = 0
         self.market_orders = []
         self.limit_orders = []
@@ -61,7 +64,10 @@ class Stub:
     def book(self, sym):
         return MID - 0.5, MID + 0.5
 
-    def limit_maker(self, sym, side, qty, price, cid):
+    def limit_maker(self, sym, side, qty, price, cid, reduce_only=False):
+        self.reduce_flags.append(("limit", reduce_only))
+        if self.place_raises:
+            raise RuntimeError(self.place_raises)
         if self.reject_post_only:
             # a real rejection is an HTTP answer, so it leads with the code
             raise RuntimeError('400 {"code":-5022,"msg":"Post Only rejected"}')
@@ -95,7 +101,8 @@ class Stub:
         return self.cancel_reports or {"orderId": oid, "status": "CANCELED",
                                        "executedQty": "0"}
 
-    def market(self, sym, side, qty):
+    def market(self, sym, side, qty, reduce_only=False):
+        self.reduce_flags.append(("market", reduce_only))
         self.market_orders.append((sym, side, qty))
         return {"orderId": 99, "status": "FILLED", "executedQty": qty}
 
@@ -190,6 +197,29 @@ def main() -> None:
              want, ex, expect_market=False)
     check("refused to guess", not ex.market_orders,
           "a possibly-resting order must not be doubled at market")
+
+    # 5xx wears an HTTP status yet answers nothing about the order: Binance
+    # documents 503/504 (and -1001/-1007) as "execution status UNKNOWN". The
+    # old predicate read any leading status digit as a rejection and sent the
+    # full size at market on top of a possibly-resting limit.
+    ex = Stub(place_raises="504 <html>Gateway Time-out</html>", lookup="works",
+              fill_after=1, fill_qty=0.007, final_status="FILLED")
+    scenario("11. 504 on placement, order WAS resting -- no market top-up",
+             want, ex, expect_market=False)
+
+    ex = Stub(place_raises='503 {"code":-1001,"msg":"disconnected"}',
+              lookup="missing")
+    scenario("12. 503/-1001, exchange confirms no order -- then market is safe",
+             want, ex, expect_market=True)
+
+    print("\n13. reduce-only travels to every order the call places")
+    ex = Stub(fill_after=None)          # no fill -> cancel -> market remainder
+    L.execute(ex, "BTCUSDT", "SELL", want, RULES, reduce_only=True)
+    check("limit leg carried reduce-only", ("limit", True) in ex.reduce_flags)
+    check("market fallback carried reduce-only",
+          ("market", True) in ex.reduce_flags)
+    check("nothing was sent without the flag",
+          all(flag for _, flag in ex.reduce_flags), f"{ex.reduce_flags}")
 
     bad = [n for n, ok in CHECKS if not ok]
     print(f"\n{'=' * 62}\n{len(CHECKS) - len(bad)}/{len(CHECKS)} checks passed")

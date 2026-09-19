@@ -421,38 +421,51 @@ class Futures:
         d = self.public("/fapi/v1/ticker/bookTicker", {"symbol": sym})
         return float(d["bidPrice"]), float(d["askPrice"])
 
-    def limit_maker(self, sym, side, qty, price, cid):
+    def limit_maker(self, sym, side, qty, price, cid, reduce_only=False):
         """GTX = post-only. Rejected outright if it would cross, so the maker
         fee is guaranteed. The caller supplies the client order id: when the
         response is lost in transit, that id is the only handle left for
-        finding out whether the order exists."""
-        return self._signed("POST", "/fapi/v1/order", {
-            "symbol": sym, "side": side, "type": "LIMIT", "quantity": qty,
-            "price": price, "timeInForce": "GTX", "newClientOrderId": cid})
+        finding out whether the order exists.
 
-    def transfers_since(self, ms: int) -> float:
-        """Net USDT moved in or out since `ms`, from the income ledger."""
-        total, start = 0.0, int(ms)
+        reduce_only marks orders that can only shrink a position. The exchange
+        then exempts them from MIN_NOTIONAL -- without it, a residual below the
+        20 USDT minimum can never be closed -- and rejects them rather than
+        flipping the position if it is already gone."""
+        p = {"symbol": sym, "side": side, "type": "LIMIT", "quantity": qty,
+             "price": price, "timeInForce": "GTX", "newClientOrderId": cid}
+        if reduce_only:
+            p["reduceOnly"] = "true"
+        return self._signed("POST", "/fapi/v1/order", p)
+
+    def transfers_since(self, ms: int) -> list:
+        """Every TRANSFER row in the income ledger since `ms`.
+
+        Rows, not a sum: the query window deliberately overlaps the previous
+        run by a minute so nothing at the boundary is missed, which means the
+        same transfer can be returned twice. The caller de-duplicates by
+        tranId; summing here would bake the double-count in."""
+        rows, start = [], int(ms)
         while True:
             page = self._signed("GET", "/fapi/v1/income",
                                 {"incomeType": "TRANSFER", "startTime": start,
                                  "limit": 1000})
-            for row in page:
-                total += float(row.get("income") or 0)
+            rows += page
             if len(page) < 1000:
                 break
             start = int(page[-1]["time"]) + 1
-        return total
+        return rows
 
     def order_by_cid(self, sym, cid):
         return self._signed("GET", "/fapi/v1/order",
                             {"symbol": sym, "origClientOrderId": cid})
 
-    def market(self, sym, side, qty):
-        return self._signed("POST", "/fapi/v1/order", {
-            "symbol": sym, "side": side, "type": "MARKET", "quantity": qty,
-            "newOrderRespType": "RESULT",
-            "newClientOrderId": _cid(sym, side, "M")})
+    def market(self, sym, side, qty, reduce_only=False):
+        p = {"symbol": sym, "side": side, "type": "MARKET", "quantity": qty,
+             "newOrderRespType": "RESULT",
+             "newClientOrderId": _cid(sym, side, "M")}
+        if reduce_only:
+            p["reduceOnly"] = "true"
+        return self._signed("POST", "/fapi/v1/order", p)
 
     def order(self, sym, order_id):
         return self._signed("GET", "/fapi/v1/order",
@@ -500,7 +513,8 @@ def fmt(d: Decimal) -> str:
 
 
 # ───────────────────────────── execution ─────────────────────────────
-def execute(ex: Futures, sym: str, side: str, qty: Decimal, r: dict) -> dict:
+def execute(ex: Futures, sym: str, side: str, qty: Decimal, r: dict,
+            reduce_only: bool = False) -> dict:
     """Rest as a maker first, take whatever is left at market."""
     qs = fmt(qty)
     bid, ask = ex.book(sym)
@@ -508,7 +522,7 @@ def execute(ex: Futures, sym: str, side: str, qty: Decimal, r: dict) -> dict:
 
     cid = _cid(sym, side, "L")
     try:
-        o = ex.limit_maker(sym, side, qs, fmt(px), cid)
+        o = ex.limit_maker(sym, side, qs, fmt(px), cid, reduce_only)
     except Exception as exc:  # noqa: BLE001
         # Two different failures share this branch and must not share a
         # response. An HTTP error is the exchange ANSWERING that the order was
@@ -520,10 +534,21 @@ def execute(ex: Futures, sym: str, side: str, qty: Decimal, r: dict) -> dict:
         # resolved by looking the order up by our own client id, and if even
         # that fails, nothing more is sent; the next run reconciles from the
         # actual position.
-        answered = str(exc).strip()[:3].isdigit()
-        if answered:
+        # An HTTP status is not by itself an answer ABOUT the order. 4xx is a
+        # verdict: the request was examined and refused (a GTX that would
+        # cross comes back 400/-5022), so nothing rests and market is safe.
+        # But Binance documents 5xx -- and -1001/-1007 under any status -- as
+        # "execution status UNKNOWN; it could have been a success". A gateway
+        # timeout wears a status code and still leaves the order possibly on
+        # the book, so those go down the same look-it-up path as a lost
+        # connection, not the market-fallback path.
+        text = str(exc).strip()
+        code = int(text[:3]) if text[:3].isdigit() else 0
+        rejected = (400 <= code < 500
+                    and "-1001" not in text and "-1007" not in text)
+        if rejected:
             log(f"    post-only rejected ({exc}); taking at market")
-            return {"mode": "market", "resp": ex.market(sym, side, qs)}
+            return {"mode": "market", "resp": ex.market(sym, side, qs, reduce_only)}
         log(f"    placement response lost ({exc}); checking by client id {cid}")
         try:
             o = ex.order_by_cid(sym, cid)
@@ -532,7 +557,7 @@ def execute(ex: Futures, sym: str, side: str, qty: Decimal, r: dict) -> dict:
             if "-2013" in str(exc2):
                 log("    exchange confirms the order does not exist; "
                     "taking at market")
-                return {"mode": "market", "resp": ex.market(sym, side, qs)}
+                return {"mode": "market", "resp": ex.market(sym, side, qs, reduce_only)}
             log(f"    FILL UNKNOWN -- cannot confirm the order either way "
                 f"({exc2}). Sending nothing further; the next run reconciles "
                 f"from the real position.")
@@ -593,8 +618,40 @@ def execute(ex: Futures, sym: str, side: str, qty: Decimal, r: dict) -> dict:
     if remain >= r["minq"] and float(remain) * mid >= float(r.get("minn", 0)):
         log(f"    taking remaining {fmt(remain)} at market")
         return {"mode": "limit+market", "maker_qty": filled,
-                "taker": ex.market(sym, side, fmt(remain))}
+                "taker": ex.market(sym, side, fmt(remain), reduce_only)}
     return {"mode": "limit", "maker_qty": filled, "status": st.get("status")}
+
+
+def flatten_all(ex: Futures) -> list:
+    """Close every open position with reduce-only market orders.
+
+    The point of stopping at -35% is to stop LOSING, and a latched kill switch
+    that walks away from an open book leaves unmanaged the very position it
+    tripped over -- at 4h per run, a falling market keeps billing an account
+    that has already decided to quit. reduce-only can only shrink exposure:
+    against a position that is already gone the exchange rejects it rather
+    than flipping direction, and it is exempt from MIN_NOTIONAL, so even a
+    residual too small to trade normally can be closed. Position sizes are lot
+    multiples by construction, so no re-quantization is needed."""
+    closed = []
+    try:
+        pos = ex.positions()
+    except Exception as exc:  # noqa: BLE001
+        log(f"  flatten: positions unreadable ({exc}); the book stays open")
+        notify("kill switch: could NOT read positions to flatten them -- "
+               "close any open position on Binance by hand")
+        return closed
+    for sym, amt in sorted(pos.items()):
+        side = "SELL" if amt > 0 else "BUY"
+        try:
+            ex.market(sym, side, fmt(Decimal(str(abs(amt)))), reduce_only=True)
+            log(f"  flattened {sym} {amt:+.6f} at market (reduce-only)")
+            closed.append(sym)
+        except Exception as exc:  # noqa: BLE001
+            log(f"  flatten FAILED for {sym}: {exc}")
+            notify(f"kill switch: flatten FAILED for {sym} -- close it on "
+                   f"Binance by hand ({exc})")
+    return closed
 
 
 # ───────────────────────────── main ─────────────────────────────
@@ -603,6 +660,24 @@ def main() -> None:
     sec = os.environ.get("BINANCE_API_SECRET", "").strip()
     if not key or not sec:
         raise SystemExit("BINANCE_API_KEY / BINANCE_API_SECRET not set")
+
+    # Reconciliation assumes it is the only writer: the plan is a diff against
+    # a position snapshot, and two runners diffing concurrently would each send
+    # the same orders. systemd never overlaps timer activations of one unit,
+    # but a manual `systemctl start` or an SSH invocation beside a running
+    # timer job is one keystroke away. The lock is advisory and vanishes with
+    # the process; fcntl does not exist on Windows, where only forced-dry
+    # workstation runs happen, so its absence is acceptable there.
+    lock = None
+    try:
+        import fcntl
+        lock = open(RESULTS / ".run.lock", "w")
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except ImportError:
+        pass
+    except OSError:
+        log("another run already holds the lock; exiting untouched")
+        return
 
     ex = Futures(key, sec)
     usdt = ex.wallet_usdt()
@@ -673,7 +748,19 @@ def main() -> None:
         big = abs(moved) > max(last_wallet * 0.20, 1.0)
         try:
             since = int(pd.Timestamp(st["last_run"]).timestamp() * 1000) - 60_000
-            xfer = ex.transfers_since(since)
+            rows = ex.transfers_since(since)
+            # The lookback overlaps the previous run's window on purpose, so a
+            # transfer near the boundary appears in both. Counting it twice
+            # would shift the baseline by twice the deposit -- and the kill
+            # floor with it -- so each tranId moves the baseline exactly once,
+            # ever. The seen-list persists in state.json alongside what it
+            # protects.
+            seen = list(st.get("seen_transfers") or [])
+            fresh = [r for r in rows if str(r.get("tranId")) not in seen]
+            xfer = sum(float(r.get("income") or 0) for r in fresh)
+            if fresh:
+                seen += [str(r.get("tranId")) for r in fresh]
+                st["seen_transfers"] = seen[-200:]
         except Exception as exc:  # noqa: BLE001
             xfer = 0.0
             if big:
@@ -744,13 +831,18 @@ def main() -> None:
         if DRY_RUN:
             # A rehearsal must leave no trace. Latching here would halt the live
             # system on the strength of a run that never sent an order.
-            log(f"KILL SWITCH would trip: {msg}  (dry run, not latched)")
+            log(f"KILL SWITCH would trip: {msg}  (dry run: not latched, "
+                f"positions not flattened)")
             return
         log(f"KILL SWITCH: {msg}")
-        notify(f"KILL SWITCH TRIPPED\n{msg}\nNo further orders will be placed.")
+        # Latch FIRST: if the flatten dies mid-way, the halt must survive it.
         st["killed_at"] = str(pd.Timestamp.now(tz="UTC"))
         st["baseline_equity"] = baseline
         STATE.write_text(json.dumps(st, indent=2), encoding="utf-8")
+        closed = flatten_all(ex)
+        notify(f"KILL SWITCH TRIPPED\n{msg}\n"
+               + (f"Closed at market: {', '.join(closed)}. " if closed else "")
+               + "No further orders will be placed.")
         return
 
     frac, bar, detail = desired_positions()
@@ -831,7 +923,16 @@ def main() -> None:
             log(f"  {sym}: delta {delta:+.6f} below minQty {r['minq']}, skipping")
             skipped.append(f"{sym} below the exchange minimum quantity")
             continue
-        if notional < float(r.get("minn", 0)):
+        # An order that can only SHRINK the position is sent reduce-only. The
+        # exchange exempts those from MIN_NOTIONAL -- without this, an ETHUSDT
+        # residual under 20 USDT could never be closed and would sit as
+        # permanent dust -- and rejects them instead of flipping direction if
+        # the position is already gone. A flip is not a reduce: its order both
+        # closes and opens, so it takes the normal path.
+        reduce = have_qty != 0 and (
+            want_qty == 0 or (want_qty * have_qty > 0
+                              and abs(want_qty) < abs(have_qty)))
+        if notional < float(r.get("minn", 0)) and not reduce:
             log(f"  {sym}: {notional:.2f} below minNotional {r.get('minn')}, skipping")
             skipped.append(f"{sym} ${notional:.0f} below the "
                            f"${float(r.get('minn', 0)):.0f} order minimum")
@@ -841,7 +942,7 @@ def main() -> None:
             notify(f"order refused {sym} ${notional:.0f} over cap ${max_order:.0f}")
             continue
         plan.append({"symbol": sym, "side": "BUY" if delta > 0 else "SELL",
-                     "qty": q, "notional": notional, "rules": r,
+                     "qty": q, "notional": notional, "rules": r, "reduce": reduce,
                      "have": have_qty, "want": want_qty})
 
     if gross > max_gross:
@@ -897,7 +998,8 @@ def main() -> None:
     else:
         for p in plan:
             try:
-                res = execute(ex, p["symbol"], p["side"], p["qty"], p["rules"])
+                res = execute(ex, p["symbol"], p["side"], p["qty"], p["rules"],
+                              reduce_only=p.get("reduce", False))
                 log(f"  {p['symbol']} done via {res.get('mode')}")
                 sent.append({"symbol": p["symbol"], "side": p["side"], **res})
             except Exception as exc:  # noqa: BLE001

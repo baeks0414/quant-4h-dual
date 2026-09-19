@@ -24,6 +24,11 @@ new orders and cannot open, size up, or move anything. No command can place an
 order. It does not close open positions either -- that is left to a human at a
 keyboard, deliberately.
 
+Besides answering, every poll runs guard_equity(): a minutely kill-switch
+sentinel that latches the same halt the trader would, four hours sooner, and
+closes the book with reduce-only orders. That is the one path here that sends
+orders at all, and reduce-only means it can shrink exposure, never create it.
+
 Env: BINANCE_API_KEY, BINANCE_API_SECRET, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID,
      KILL_DRAWDOWN
 """
@@ -99,6 +104,123 @@ def read_state() -> dict:
         return json.loads(STATE.read_text(encoding="utf-8"))
     except Exception:  # noqa: BLE001
         return {}
+
+
+def _binance(method: str, path: str, params: dict | None = None):
+    """Minimal signed client, stdlib only.
+
+    The guard below runs every minute; importing the trader (pandas and the
+    strategy package, ~2.5s of CPU) sixty times an hour to make one HTTP call
+    would be the tail wagging the dog. Binance accepts signed parameters in
+    the query string for POST as well, so no body handling is needed."""
+    import hashlib
+    import hmac
+    import urllib.parse
+    import urllib.request
+    key = os.environ.get("BINANCE_API_KEY", "").strip()
+    sec = os.environ.get("BINANCE_API_SECRET", "").strip()
+    p = dict(params or {})
+    p["timestamp"] = int(time.time() * 1000)
+    p["recvWindow"] = 10_000
+    qs = urllib.parse.urlencode(p)
+    sig = hmac.new(sec.encode(), qs.encode(), hashlib.sha256).hexdigest()
+    req = urllib.request.Request(
+        f"https://fapi.binance.com{path}?{qs}&signature={sig}",
+        headers={"X-MBX-APIKEY": key}, method=method)
+    with urllib.request.urlopen(req, timeout=20) as r:
+        return json.load(r)
+
+
+GUARD_DRY = os.environ.get("GUARD_DRY") == "1"
+
+
+def guard_equity() -> None:
+    """Minutely kill-switch sentinel.
+
+    The trader checks its floor once per 4h run; on a roughly 1x book a crash
+    can carry the account well past -35% inside that window. This poller is
+    already awake every minute, so it re-checks the same floor against live
+    marginBalance and, on a breach, does exactly what the trader would do at
+    its next run -- latch, flatten reduce-only, stop the schedule -- four
+    hours sooner. Everything here can only reduce exposure; nothing in this
+    path can open or enlarge a position.
+
+    If a trader run is active the guard defers: two processes reconciling the
+    same book at once is the one thing the design forbids, the run's own plan
+    is already in flight, and the next poll is sixty seconds away."""
+    st = read_state()
+    base = float(st.get("baseline_equity") or 0)
+    if base <= 0 or st.get("killed_at"):
+        return
+    floor = base * (1 - KILL)
+    try:
+        acct = _binance("GET", "/fapi/v2/account")
+        equity = next((float(a.get("marginBalance") or 0)
+                       for a in acct.get("assets", [])
+                       if a.get("asset") == "USDT"), 0.0)
+    except Exception as exc:  # noqa: BLE001
+        print(f"guard: equity unreadable ({exc}); nothing decided", flush=True)
+        return
+    if equity >= floor:
+        return
+
+    try:
+        r = subprocess.run(["systemctl", "is-active", "quant4h.service"],
+                           capture_output=True, text=True, timeout=10)
+        if r.stdout.strip() == "active":
+            print("guard: floor breached but a trader run is active; "
+                  "deferring to it", flush=True)
+            return
+    except Exception:  # noqa: BLE001
+        pass
+
+    msg = (f"equity {equity:.2f} fell below the kill floor {floor:.2f} "
+           f"(baseline {base:.2f})")
+    if GUARD_DRY:
+        print(f"guard DRY: would latch, flatten and stop -- {msg}", flush=True)
+        return
+
+    print(f"guard: KILL -- {msg}", flush=True)
+    # Latch first, exactly as the trader does: if anything after this line
+    # fails, the halt must already be on disk.
+    st["killed_at"] = time.strftime("%Y-%m-%d %H:%M:%S+00:00", time.gmtime())
+    st["killed_by"] = "guard"
+    STATE.write_text(json.dumps(st, indent=2), encoding="utf-8")
+
+    closed, failed = [], []
+    try:
+        for pos in _binance("GET", "/fapi/v2/positionRisk"):
+            amt = float(pos.get("positionAmt") or 0)
+            if abs(amt) <= 0:
+                continue
+            sym = pos["symbol"]
+            try:
+                _binance("POST", "/fapi/v1/order", {
+                    "symbol": sym, "side": "SELL" if amt > 0 else "BUY",
+                    "type": "MARKET",
+                    "quantity": str(pos["positionAmt"]).lstrip("-"),
+                    "reduceOnly": "true",
+                    "newClientOrderId": f"D4HGUARD{int(time.time()) % 10**9}"})
+                closed.append(sym)
+            except Exception as exc:  # noqa: BLE001
+                failed.append(sym)
+                print(f"guard: flatten FAILED for {sym}: {exc}", flush=True)
+    except Exception as exc:  # noqa: BLE001
+        print(f"guard: positions unreadable, nothing flattened: {exc}",
+              flush=True)
+        failed.append("(positions unreadable)")
+
+    try:
+        subprocess.run(["sudo", "-n", "systemctl", "disable", "--now", TIMER],
+                       capture_output=True, text=True, timeout=20)
+    except Exception:  # noqa: BLE001
+        pass
+
+    send(CHAT, "⛔ <b>KILL SWITCH (minutely guard)</b>\n" + msg
+         + (f"\nclosed at market: {', '.join(closed)}" if closed else "")
+         + (f"\n⚠ close by hand on Binance: {', '.join(failed)}"
+            if failed else "")
+         + "\nThe schedule is stopped; trading will not resume on its own.")
 
 
 def last_run() -> dict:
@@ -403,6 +525,11 @@ def main() -> None:
         print("TELEGRAM_TOKEN / TELEGRAM_CHAT_ID not set", flush=True)
         return
     RESULTS.mkdir(parents=True, exist_ok=True)
+    try:
+        guard_equity()
+    except Exception as exc:  # noqa: BLE001
+        # the guard must never take the message loop down with it
+        print(f"guard crashed: {exc}", flush=True)
     try:
         offset = int(json.loads(OFFSET.read_text())["offset"])
     except Exception:  # noqa: BLE001
